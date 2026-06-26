@@ -15,11 +15,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -32,26 +34,36 @@ var (
 	gitPAT      = ""
 	gitEmail    = ""
 	gitName     = ""
-	userAgent   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+	pageTitle   = "Frank Tracker"
+	concurrency = 8
+	maxBodySize = int64(100 * 1024 * 1024)
+	imgThresholdBytes = 24 * 1024 * 1024
+	jpegQuality = 85
 
-	reTelemetry    = regexp.MustCompile(`(?s)<script\b[^>]*>\s*window\['ppConfig'\].*?</script>`)
-	reImgTag       = regexp.MustCompile(`(?i)<img\b`)
-	rePointerNone  = regexp.MustCompile(`(?i)(<img\b[^>]*style="[^"]*?)pointer-events:\s*none`)
-	reSizeSuffix   = regexp.MustCompile(`=w\d+(?:-h\d+)?`)
+	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+
+	reTelemetry       = regexp.MustCompile(`(?s)<script\b[^>]*>\s*window\['ppConfig'\].*?</script>`)
+	reImgTag          = regexp.MustCompile(`(?i)<img\b`)
+	rePointerNone     = regexp.MustCompile(`(?i)(<img\b[^>]*style="[^"]*?)pointer-events:\s*none`)
+	reSizeSuffix      = regexp.MustCompile(`=w\d+(?:-h\d+)?`)
 	reSupportRedirect = regexp.MustCompile(`window\.location\.href\s*=\s*'[^']*support\.google\.com[^']*'`)
 	reGoogleRedirect  = regexp.MustCompile(`(href=")https://www\.google\.com/url\?q=([^&"]+)[^"]*(")`)
-	reGid            = regexp.MustCompile(`gid=(\d+)`)
-	reAssetPath      = regexp.MustCompile(`(?:src|href)=['"](/(?:static|_|htmlview)/[^'"]+)['"]`)
-	reExtImageSheets = regexp.MustCompile(`https://docs\.google\.com/sheets-images-rt/[A-Za-z0-9_=-]+`)
-	reExtImageLH7    = regexp.MustCompile(`https://lh7-us\.googleusercontent\.com/[^\s"'<>)]+`)
-	reExtImageStatic = regexp.MustCompile(`https://ssl\.gstatic\.com/[^\s"'<>)]+`)
-	reCssImport      = regexp.MustCompile(`@import url\(((?:https?:)?//[^)]+)\);?`)
-	reCssUrl         = regexp.MustCompile(`url\(((?:https?:)?//[^)]+)\)`)
-	reKitParam       = regexp.MustCompile(`[?&]kit=`)
-	reInlineStyle    = regexp.MustCompile(`(?s)<style>(.*?)</style>`)
-	reHasExternal    = regexp.MustCompile(`https?://|url\(`)
-	reExtFromPath    = regexp.MustCompile(`\.([a-zA-Z0-9]+)(?:[?#]|$)`)
-	reLH7Strip       = regexp.MustCompile(`=w\d+(?:-h\d+)?(?:-p)?$`)
+	reGid             = regexp.MustCompile(`gid=(\d+)`)
+	reAssetPath       = regexp.MustCompile(`(?:src|href)=['"](/(?:static|_|htmlview)/[^'"]+)['"]`)
+	reExtImageSheets  = regexp.MustCompile(`https://docs\.google\.com/sheets-images-rt/[A-Za-z0-9_=-]+`)
+	reExtImageLH7     = regexp.MustCompile(`https://lh7-us\.googleusercontent\.com/[^\s"'<>)]+`)
+	reExtImageStatic  = regexp.MustCompile(`https://ssl\.gstatic\.com/[^\s"'<>)]+`)
+	reCssImport       = regexp.MustCompile(`@import url\(((?:https?:)?//[^)]+)\);?`)
+	reCssUrl          = regexp.MustCompile(`url\(((?:https?:)?//[^)]+)\)`)
+	reKitParam        = regexp.MustCompile(`[?&]kit=`)
+	reInlineStyle     = regexp.MustCompile(`(?s)<style>(.*?)</style>`)
+	reHasExternal     = regexp.MustCompile(`https?://|url\(`)
+	reExtFromPath     = regexp.MustCompile(`\.([a-zA-Z0-9]+)(?:[?#]|$)`)
+	reLH7Strip        = regexp.MustCompile(`=w\d+(?:-h\d+)?(?:-p)?$`)
+	reTitle           = regexp.MustCompile(`(?s)<title>(.*?)</title>`)
+	reOgTitle         = regexp.MustCompile(`(?s)<meta\s+property="og:title"\s+content="[^"]*"\s*>`)
+	reDocTitle        = regexp.MustCompile(`(?s)<span\s+class="name">[^<]*</span>`)
+	reFirstLink       = regexp.MustCompile(`(?s)(<link\s[^>]*rel=['"]stylesheet['"][^>]*>)`)
 
 	client = &http.Client{
 		Timeout: 60 * time.Second,
@@ -62,6 +74,11 @@ var (
 			return nil
 		},
 	}
+
+	imgFlight     sync.Map
+	cssFlight     sync.Map
+	cssImportSeen sync.Map
+	genMu         sync.Mutex
 )
 
 func init() {
@@ -87,6 +104,19 @@ func init() {
 			pollMinutes = n
 		}
 	}
+	if v := os.Getenv("CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			concurrency = n
+		}
+	}
+	if v := os.Getenv("PAGE_TITLE"); v != "" {
+		pageTitle = v
+	}
+	if v := os.Getenv("JPEG_QUALITY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			jpegQuality = n
+		}
+	}
 	gitRepo = os.Getenv("GIT_REPO")
 	gitPAT = os.Getenv("GIT_PAT")
 	gitEmail = os.Getenv("GIT_EMAIL")
@@ -105,6 +135,9 @@ func sha1hex(s string) string {
 }
 
 func extFromContentType(ct string) string {
+	if strings.Contains(ct, "svg") {
+		return "svg"
+	}
 	if strings.Contains(ct, "png") {
 		return "png"
 	}
@@ -131,11 +164,6 @@ func extFromFilename(path string) string {
 	return "bin"
 }
 
-var reTitle = regexp.MustCompile(`(?s)<title>(.*?)</title>`)
-var reOgTitle = regexp.MustCompile(`(?s)<meta\s+property="og:title"\s+content="[^"]*"\s*>`)
-var reDocTitle = regexp.MustCompile(`(?s)<span\s+class="name">[^<]*</span>`)
-var reFirstLink = regexp.MustCompile(`(?s)(<link\s[^>]*rel=['"]stylesheet['"][^>]*>)`)
-
 func commonTransform(html string) string {
 	html = reTelemetry.ReplaceAllString(html, "")
 	html = reImgTag.ReplaceAllString(html, `<img crossorigin="anonymous" referrerpolicy="no-referrer"`)
@@ -155,9 +183,9 @@ func commonTransform(html string) string {
 	})
 
 	html = strings.ReplaceAll(html, `"docs-Helvetica Neue"`, `"Helvetica Neue"`)
-	html = reTitle.ReplaceAllString(html, `<title>Frank Tracker</title>`)
-	html = reOgTitle.ReplaceAllString(html, `<meta property="og:title" content="Frank Tracker">`)
-	html = reDocTitle.ReplaceAllString(html, `<span class="name">Frank Tracker</span>`)
+	html = reTitle.ReplaceAllString(html, `<title>`+pageTitle+`</title>`)
+	html = reOgTitle.ReplaceAllString(html, `<meta property="og:title" content="`+pageTitle+`">`)
+	html = reDocTitle.ReplaceAllString(html, `<span class="name">`+pageTitle+`</span>`)
 
 	coollabsLink := `<link href="https://api.fonts.coollabs.io/css2?family=Helvetica+Neue&display=swap" rel="stylesheet">`
 	if !strings.Contains(html, "coollabs.io") {
@@ -207,13 +235,50 @@ func extractAssetPaths(html string) []string {
 	return result
 }
 
-func httpGet(url string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func httpGet(ctx context.Context, rawURL string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
 	return client.Do(req)
+}
+
+func httpGetRetry(ctx context.Context, rawURL string, maxRetries int) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(1<<uint(attempt-1)) * time.Second):
+			}
+		}
+		resp, err := httpGet(ctx, rawURL)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode == 500 || resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504 {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
+		}
+		return resp, nil
+	}
+	return nil, lastErr
+}
+
+func mkdirAll(path string) {
+	if err := os.MkdirAll(path, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "  mkdir %s: %v\n", path, err)
+	}
+}
+
+func writeFile(path string, data []byte) {
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "  write %s: %v\n", path, err)
+	}
 }
 
 func localizeImage(rawURL string) string {
@@ -225,6 +290,11 @@ func localizeImage(rawURL string) string {
 		}
 	}
 
+	if _, loaded := imgFlight.LoadOrStore(rawURL, true); loaded {
+		return ""
+	}
+	defer imgFlight.Delete(rawURL)
+
 	fetchURL := rawURL
 	if strings.Contains(rawURL, "lh7-us.googleusercontent.com") {
 		fetchURL = reLH7Strip.ReplaceAllString(rawURL, "")
@@ -232,13 +302,7 @@ func localizeImage(rawURL string) string {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := client.Do(req)
+	resp, err := httpGetRetry(ctx, fetchURL, 3)
 	if err != nil {
 		return ""
 	}
@@ -247,14 +311,19 @@ func localizeImage(rawURL string) string {
 		return ""
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return ""
 	}
 
-	os.MkdirAll(filepath.Join(wwwDir, "assets"), 0755)
+	mkdirAll(filepath.Join(wwwDir, "assets"))
 
-	if len(data) > 24*1024*1024 {
+	if len(data) > imgThresholdBytes {
+		cfg, _, decErr := image.DecodeConfig(bytes.NewReader(data))
+		if decErr == nil && cfg.Width*cfg.Height > 16384*16384 {
+			fmt.Fprintf(os.Stderr, "  skipping too-large image %s (%dx%d)\n", rawURL, cfg.Width, cfg.Height)
+			return ""
+		}
 		if img, _, decErr := image.Decode(bytes.NewReader(data)); decErr == nil {
 			bounds := img.Bounds()
 			rgba := image.NewRGBA(bounds)
@@ -265,15 +334,15 @@ func localizeImage(rawURL string) string {
 				}
 			}
 			var pngBuf bytes.Buffer
-			if png.Encode(&pngBuf, rgba) == nil && pngBuf.Len() < 24*1024*1024 {
+			if png.Encode(&pngBuf, rgba) == nil && pngBuf.Len() < imgThresholdBytes {
 				dest := filepath.Join(wwwDir, "assets", name+".png")
-				os.WriteFile(dest, pngBuf.Bytes(), 0644)
+				writeFile(dest, pngBuf.Bytes())
 				return "/assets/" + name + ".png"
 			}
 			var jpgBuf bytes.Buffer
-			if jpeg.Encode(&jpgBuf, rgba, &jpeg.Options{Quality: 85}) == nil {
+			if jpeg.Encode(&jpgBuf, rgba, &jpeg.Options{Quality: jpegQuality}) == nil {
 				dest := filepath.Join(wwwDir, "assets", name+".jpg")
-				os.WriteFile(dest, jpgBuf.Bytes(), 0644)
+				writeFile(dest, jpgBuf.Bytes())
 				return "/assets/" + name + ".jpg"
 			}
 		}
@@ -283,22 +352,14 @@ func localizeImage(rawURL string) string {
 	ext := extFromContentType(ct)
 	dest := filepath.Join(wwwDir, "assets", name+"."+ext)
 
-	if err := os.WriteFile(dest, data, 0644); err != nil {
-		return ""
-	}
+	writeFile(dest, data)
 	return "/assets/" + name + "." + ext
 }
 
 func fetchTransformedMain() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", sheetURL+"/htmlview", nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := client.Do(req)
+	resp, err := httpGetRetry(ctx, sheetURL+"/htmlview", 2)
 	if err != nil {
 		fmt.Println("  main fetch error:", err)
 		return ""
@@ -309,7 +370,7 @@ func fetchTransformedMain() string {
 		return ""
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return ""
 	}
@@ -327,13 +388,7 @@ func fetchTransformedTab(gid string) string {
 	target := fmt.Sprintf("https://docs.google.com%s/htmlview/sheet?headers=true&gid=%s", sheetPath, gid)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := client.Do(req)
+	resp, err := httpGetRetry(ctx, target, 2)
 	if err != nil {
 		fmt.Printf("  tab %s fetch error: %v\n", gid, err)
 		return ""
@@ -344,7 +399,7 @@ func fetchTransformedTab(gid string) string {
 		return ""
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return ""
 	}
@@ -363,15 +418,14 @@ func localizeCssAsset(rawURL string) string {
 		return "/assets/css/" + name + "." + ext
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
-	if err != nil {
+	if _, loaded := cssFlight.LoadOrStore(rawURL, true); loaded {
 		return ""
 	}
-	req.Header.Set("User-Agent", userAgent)
+	defer cssFlight.Delete(rawURL)
 
-	resp, err := client.Do(req)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := httpGetRetry(ctx, rawURL, 2)
 	if err != nil {
 		return ""
 	}
@@ -380,14 +434,12 @@ func localizeCssAsset(rawURL string) string {
 		return ""
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return ""
 	}
-	os.MkdirAll(filepath.Dir(dest), 0755)
-	if err := os.WriteFile(dest, data, 0644); err != nil {
-		return ""
-	}
+	mkdirAll(filepath.Dir(dest))
+	writeFile(dest, data)
 	fmt.Println("  css asset", rawURL)
 	return "/assets/css/" + name + "." + ext
 }
@@ -402,15 +454,13 @@ func localizeCss(css string, depth int) string {
 			if reKitParam.MatchString(importURL) {
 				continue
 			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			req, err := http.NewRequestWithContext(ctx, "GET", importURL, nil)
-			if err != nil {
-				cancel()
+			if _, loaded := cssImportSeen.LoadOrStore(importURL, true); loaded {
+				css = strings.Replace(css, m[0], "", 1)
 				continue
 			}
-			req.Header.Set("User-Agent", userAgent)
-			resp, err := client.Do(req)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			resp, err := httpGetRetry(ctx, importURL, 2)
 			cancel()
 			if err != nil || resp.StatusCode != 200 {
 				if resp != nil {
@@ -418,7 +468,7 @@ func localizeCss(css string, depth int) string {
 				}
 				continue
 			}
-			body, err := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 			resp.Body.Close()
 			if err != nil {
 				continue
@@ -472,13 +522,7 @@ func downloadAsset(path string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://docs.google.com"+path, nil)
-	if err != nil {
-		return
-	}
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := client.Do(req)
+	resp, err := httpGetRetry(ctx, "https://docs.google.com"+path, 2)
 	if err != nil {
 		return
 	}
@@ -487,18 +531,18 @@ func downloadAsset(path string) {
 		return
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return
 	}
 
-	os.MkdirAll(filepath.Dir(dest), 0755)
+	mkdirAll(filepath.Dir(dest))
 
 	if strings.HasSuffix(path, ".css") {
 		css := localizeCss(string(data), 0)
-		os.WriteFile(dest, []byte(css), 0644)
+		writeFile(dest, []byte(css))
 	} else {
-		os.WriteFile(dest, data, 0644)
+		writeFile(dest, data)
 	}
 	fmt.Println("  asset", path)
 }
@@ -512,6 +556,11 @@ func pAll(fns []func(), concurrency int) {
 		go func(f func()) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "  panic in worker: %v\n", r)
+				}
+			}()
 			f()
 		}(fn)
 	}
@@ -564,9 +613,14 @@ func runGit(args ...string) (string, error) {
 	return string(out), err
 }
 
-func generate() {
+func generate(ctx context.Context) {
+	genMu.Lock()
+	defer genMu.Unlock()
+
 	t0 := time.Now()
 	fmt.Printf("[%s] generate start\n", time.Now().UTC().Format(time.RFC3339))
+
+	cssImportSeen = sync.Map{}
 
 	fmt.Println("  fetching main page...")
 	mainHTML := fetchTransformedMain()
@@ -593,7 +647,11 @@ func generate() {
 			}
 		}
 	}
-	pAll(tabFns, 8)
+	pAll(tabFns, concurrency)
+
+	if ctx.Err() != nil {
+		return
+	}
 
 	for _, t := range tabs {
 		old := `\/htmlview\/sheet?headers\x3dtrue&gid=` + t.gid
@@ -643,8 +701,12 @@ func generate() {
 			imgMu.Unlock()
 		}
 	}
-	pAll(imgFns, 8)
+	pAll(imgFns, concurrency)
 	fmt.Printf("  images done: %d ok, %d failed\n", imgOk, imgFail)
+
+	if ctx.Err() != nil {
+		return
+	}
 
 	applyImageMap := func(html string) string {
 		for u, local := range imageMap {
@@ -664,37 +726,40 @@ func generate() {
 	}
 
 	os.MkdirAll(filepath.Join(wwwDir, "htmlview", "sheet"), 0755)
-	os.WriteFile(filepath.Join(wwwDir, "index.html"), []byte(mainHTML), 0644)
+	writeFile(filepath.Join(wwwDir, "index.html"), []byte(mainHTML))
 	for _, t := range tabs {
-		os.WriteFile(filepath.Join(wwwDir, "htmlview", "sheet", t.gid+".html"), []byte(t.html), 0644)
+		writeFile(filepath.Join(wwwDir, "htmlview", "sheet", t.gid+".html"), []byte(t.html))
 	}
 
 	assetSet := make(map[string]bool)
-	var assetList []string
 	for _, p := range extractAssetPaths(mainHTML) {
 		assetSet[p] = true
 	}
 	for _, t := range tabs {
 		for _, p := range extractAssetPaths(t.html) {
-			if !assetSet[p] {
-				assetSet[p] = true
-				assetList = append(assetList, p)
-			}
+			assetSet[p] = true
 		}
 	}
+	assetList := make([]string, 0, len(assetSet))
 	for p := range assetSet {
 		assetList = append(assetList, p)
 	}
 	fmt.Printf("  %d static assets to download\n", len(assetList))
+
+	if ctx.Err() != nil {
+		return
+	}
 
 	assetFns := make([]func(), len(assetList))
 	for i, p := range assetList {
 		p := p
 		assetFns[i] = func() { downloadAsset(p) }
 	}
-	pAll(assetFns, 8)
+	pAll(assetFns, concurrency)
 
-	gitPush()
+	if ctx.Err() == nil {
+		gitPush()
+	}
 
 	elapsed := time.Since(t0).Seconds()
 	fmt.Printf("  done in %.1fs - index.html (%dB), %d tabs, %d assets, %d images\n",
@@ -702,10 +767,21 @@ func generate() {
 }
 
 func main() {
-	generate()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	generate(ctx)
+
 	ticker := time.NewTicker(time.Duration(pollMinutes) * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		generate()
+
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("\nshutting down")
+			return
+		case <-ticker.C:
+			generate(ctx)
+		}
 	}
 }
