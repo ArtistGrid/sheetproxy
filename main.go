@@ -532,19 +532,25 @@ func gitPush() {
 	remoteURL := fmt.Sprintf("https://%s@github.com/%s.git", gitPAT, gitRepo)
 
 	gitDir := filepath.Join(wwwDir, ".git")
-	os.RemoveAll(gitDir)
-
-	runGit("init", "-b", "main")
-	runGit("config", "user.email", gitEmail)
-	runGit("config", "user.name", gitName)
-	runGit("remote", "add", "origin", remoteURL)
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		runGit("init", "-b", "main")
+		runGit("config", "user.email", gitEmail)
+		runGit("config", "user.name", gitName)
+		runGit("remote", "add", "origin", remoteURL)
+	} else {
+		runGit("remote", "set-url", "origin", remoteURL)
+	}
 
 	runGit("add", "-A")
+	if out, err := runGit("diff", "--cached", "--quiet"); err == nil && out == "" {
+		fmt.Println("  no changes to commit")
+		return
+	}
 	commitMsg := fmt.Sprintf("update %s", time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
-	if out, err := runGit("commit", "-m", commitMsg, "--allow-empty"); err != nil {
+	if out, err := runGit("commit", "-m", commitMsg); err != nil {
 		fmt.Printf("  git commit: %s\n", out)
 	}
-	if out, err := runGit("push", "--force", "origin", "main"); err != nil {
+	if out, err := runGit("push", "origin", "main"); err != nil {
 		fmt.Printf("  git push: %s\n", out)
 	} else {
 		fmt.Println("  git push ok")
