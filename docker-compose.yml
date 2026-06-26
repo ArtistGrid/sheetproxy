@@ -1,0 +1,7 @@
+services:
+  sheetproxy:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./www:/www
