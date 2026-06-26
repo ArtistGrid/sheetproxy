@@ -6,7 +6,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"image"
-	"image/color"
+	"image/draw"
 	_ "image/gif"
 	"image/jpeg"
 	"image/png"
@@ -64,6 +64,7 @@ var (
 	reOgTitle         = regexp.MustCompile(`(?s)<meta\s+property="og:title"\s+content="[^"]*"\s*>`)
 	reDocTitle        = regexp.MustCompile(`(?s)<span\s+class="name">[^<]*</span>`)
 	reFirstLink       = regexp.MustCompile(`(?s)(<link\s[^>]*rel=['"]stylesheet['"][^>]*>)`)
+	reReferencedAsset = regexp.MustCompile(`(?:src|href)=['"](/assets/[^'"]+)['"]`)
 
 	client = &http.Client{
 		Timeout: 60 * time.Second,
@@ -75,8 +76,6 @@ var (
 		},
 	}
 
-	imgFlight     sync.Map
-	cssFlight     sync.Map
 	cssImportSeen sync.Map
 	genMu         sync.Mutex
 )
@@ -191,6 +190,10 @@ func commonTransform(html string) string {
 	if !strings.Contains(html, "coollabs.io") {
 		if m := reFirstLink.FindStringIndex(html); m != nil {
 			html = html[:m[0]] + coollabsLink + html[m[0]:]
+		} else if idx := strings.Index(html, "</title>"); idx != -1 {
+			html = html[:idx+len("</title>")] + coollabsLink + html[idx+len("</title>"):]
+		} else if idx := strings.Index(html, "</head>"); idx != -1 {
+			html = html[:idx] + coollabsLink + html[idx:]
 		}
 	}
 
@@ -259,7 +262,9 @@ func httpGetRetry(ctx context.Context, rawURL string, maxRetries int) (*http.Res
 			lastErr = err
 			continue
 		}
-		if resp.StatusCode == 500 || resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504 {
+		if resp.StatusCode == 408 || resp.StatusCode == 429 ||
+			resp.StatusCode == 500 || resp.StatusCode == 502 ||
+			resp.StatusCode == 503 || resp.StatusCode == 504 {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			continue
@@ -290,11 +295,6 @@ func localizeImage(rawURL string) string {
 		}
 	}
 
-	if _, loaded := imgFlight.LoadOrStore(rawURL, true); loaded {
-		return ""
-	}
-	defer imgFlight.Delete(rawURL)
-
 	fetchURL := rawURL
 	if strings.Contains(rawURL, "lh7-us.googleusercontent.com") {
 		fetchURL = reLH7Strip.ReplaceAllString(rawURL, "")
@@ -308,6 +308,7 @@ func localizeImage(rawURL string) string {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "  image %s: HTTP %d\n", rawURL, resp.StatusCode)
 		return ""
 	}
 
@@ -315,8 +316,6 @@ func localizeImage(rawURL string) string {
 	if err != nil {
 		return ""
 	}
-
-	mkdirAll(filepath.Join(wwwDir, "assets"))
 
 	if len(data) > imgThresholdBytes {
 		cfg, _, decErr := image.DecodeConfig(bytes.NewReader(data))
@@ -327,12 +326,7 @@ func localizeImage(rawURL string) string {
 		if img, _, decErr := image.Decode(bytes.NewReader(data)); decErr == nil {
 			bounds := img.Bounds()
 			rgba := image.NewRGBA(bounds)
-			for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-				for x := bounds.Min.X; x < bounds.Max.X; x++ {
-					r, g, b, _ := img.At(x, y).RGBA()
-					rgba.Set(x, y, color.RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), 255})
-				}
-			}
+			draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
 			var pngBuf bytes.Buffer
 			if png.Encode(&pngBuf, rgba) == nil && pngBuf.Len() < imgThresholdBytes {
 				dest := filepath.Join(wwwDir, "assets", name+".png")
@@ -418,11 +412,6 @@ func localizeCssAsset(rawURL string) string {
 		return "/assets/css/" + name + "." + ext
 	}
 
-	if _, loaded := cssFlight.LoadOrStore(rawURL, true); loaded {
-		return ""
-	}
-	defer cssFlight.Delete(rawURL)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	resp, err := httpGetRetry(ctx, rawURL, 2)
@@ -438,7 +427,6 @@ func localizeCssAsset(rawURL string) string {
 	if err != nil {
 		return ""
 	}
-	mkdirAll(filepath.Dir(dest))
 	writeFile(dest, data)
 	fmt.Println("  css asset", rawURL)
 	return "/assets/css/" + name + "." + ext
@@ -528,6 +516,7 @@ func downloadAsset(path string) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "  asset %s: HTTP %d\n", path, resp.StatusCode)
 		return
 	}
 
@@ -535,8 +524,6 @@ func downloadAsset(path string) {
 	if err != nil {
 		return
 	}
-
-	mkdirAll(filepath.Dir(dest))
 
 	if strings.HasSuffix(path, ".css") {
 		css := localizeCss(string(data), 0)
@@ -572,7 +559,7 @@ type tabResult struct {
 	html string
 }
 
-func gitPush() {
+func gitPush(ctx context.Context) {
 	if gitRepo == "" || gitPAT == "" {
 		fmt.Println("  git push skipped (GIT_REPO/GIT_PAT not set)")
 		return
@@ -582,35 +569,61 @@ func gitPush() {
 
 	gitDir := filepath.Join(wwwDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		runGit("init", "-b", "main")
-		runGit("config", "user.email", gitEmail)
-		runGit("config", "user.name", gitName)
-		runGit("remote", "add", "origin", remoteURL)
+		runGitCtx(ctx, "init", "-b", "main")
+		runGitCtx(ctx, "config", "user.email", gitEmail)
+		runGitCtx(ctx, "config", "user.name", gitName)
+		runGitCtx(ctx, "remote", "add", "origin", remoteURL)
 	} else {
-		runGit("remote", "set-url", "origin", remoteURL)
+		runGitCtx(ctx, "remote", "set-url", "origin", remoteURL)
 	}
 
-	runGit("add", "-A")
-	if out, err := runGit("diff", "--cached", "--quiet"); err == nil && out == "" {
+	runGitCtx(ctx, "add", "-A")
+	if out, err := runGitCtx(ctx, "diff", "--cached", "--quiet"); err == nil && out == "" {
 		fmt.Println("  no changes to commit")
 		return
 	}
 	commitMsg := fmt.Sprintf("update %s", time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
-	if out, err := runGit("commit", "-m", commitMsg); err != nil {
+	if out, err := runGitCtx(ctx, "commit", "-m", commitMsg); err != nil {
 		fmt.Printf("  git commit: %s\n", out)
 	}
-	if out, err := runGit("push", "origin", "main"); err != nil {
+	if out, err := runGitCtx(ctx, "push", "origin", "main"); err != nil {
 		fmt.Printf("  git push: %s\n", out)
 	} else {
 		fmt.Println("  git push ok")
 	}
 }
 
-func runGit(args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+func runGitCtx(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = wwwDir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+func cleanupStaleAssets(referenced map[string]bool) {
+	assetDirs := []string{
+		filepath.Join(wwwDir, "assets"),
+		filepath.Join(wwwDir, "assets", "css"),
+	}
+	for _, dir := range assetDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			relPath := "/assets/" + filepath.Base(e.Name())
+			if dir == filepath.Join(wwwDir, "assets", "css") {
+				relPath = "/assets/css/" + filepath.Base(e.Name())
+			}
+			if !referenced[relPath] {
+				os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
 }
 
 func generate(ctx context.Context) {
@@ -621,6 +634,11 @@ func generate(ctx context.Context) {
 	fmt.Printf("[%s] generate start\n", time.Now().UTC().Format(time.RFC3339))
 
 	cssImportSeen = sync.Map{}
+
+	mkdirAll(wwwDir)
+	mkdirAll(filepath.Join(wwwDir, "assets"))
+	mkdirAll(filepath.Join(wwwDir, "assets", "css"))
+	mkdirAll(filepath.Join(wwwDir, "htmlview", "sheet"))
 
 	fmt.Println("  fetching main page...")
 	mainHTML := fetchTransformedMain()
@@ -725,7 +743,20 @@ func generate(ctx context.Context) {
 		tabs[i].html = localizeInlineStyles(tabs[i].html)
 	}
 
-	os.MkdirAll(filepath.Join(wwwDir, "htmlview", "sheet"), 0755)
+	reReferencedAsset := regexp.MustCompile(`(?:src|href)=['"](/assets/[^'"]+)['"]`)
+	referencedAssets := make(map[string]bool)
+	for _, h := range append([]string{mainHTML}, func() []string {
+		var h []string
+		for _, t := range tabs {
+			h = append(h, t.html)
+		}
+		return h
+	}()...) {
+		for _, m := range reReferencedAsset.FindAllStringSubmatch(h, -1) {
+			referencedAssets[m[1]] = true
+		}
+	}
+
 	writeFile(filepath.Join(wwwDir, "index.html"), []byte(mainHTML))
 	for _, t := range tabs {
 		writeFile(filepath.Join(wwwDir, "htmlview", "sheet", t.gid+".html"), []byte(t.html))
@@ -758,8 +789,10 @@ func generate(ctx context.Context) {
 	pAll(assetFns, concurrency)
 
 	if ctx.Err() == nil {
-		gitPush()
+		gitPush(ctx)
 	}
+
+	cleanupStaleAssets(referencedAssets)
 
 	elapsed := time.Since(t0).Seconds()
 	fmt.Printf("  done in %.1fs - index.html (%dB), %d tabs, %d assets, %d images\n",
