@@ -62,9 +62,11 @@ var (
 	reLH7Strip        = regexp.MustCompile(`=w\d+(?:-h\d+)?(?:-p)?$`)
 	reTitle           = regexp.MustCompile(`(?s)<title>(.*?)</title>`)
 	reOgTitle         = regexp.MustCompile(`(?s)<meta\s+property="og:title"\s+content="[^"]*"\s*>`)
+	reOgUrl           = regexp.MustCompile(`(?s)<meta\s+property="og:url"\s+content="[^"]*"\s*>`)
 	reDocTitle        = regexp.MustCompile(`(?s)<span\s+class="name">[^<]*</span>`)
 	reFirstLink       = regexp.MustCompile(`(?s)(<link\s[^>]*rel=['"]stylesheet['"][^>]*>)`)
 	reReferencedAsset = regexp.MustCompile(`(?:src|href)=['"](/assets/[^'"]+)['"]`)
+	reSheetUrl        = regexp.MustCompile(`https://docs\.google\.com/spreadsheets/d/[^/"'\''<> ]+`)
 
 	client = &http.Client{
 		Timeout: 60 * time.Second,
@@ -183,6 +185,8 @@ func commonTransform(html string) string {
 
 	html = strings.ReplaceAll(html, `"docs-Helvetica Neue"`, `"Helvetica Neue"`)
 	html = reTitle.ReplaceAllString(html, `<title>`+pageTitle+`</title>`)
+	html = reOgUrl.ReplaceAllString(html, "")
+	html = reSheetUrl.ReplaceAllString(html, "")
 	html = reOgTitle.ReplaceAllString(html, `<meta property="og:title" content="`+pageTitle+`">`)
 	html = reDocTitle.ReplaceAllString(html, `<span class="name">`+pageTitle+`</span>`)
 
