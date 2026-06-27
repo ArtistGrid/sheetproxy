@@ -39,6 +39,8 @@ var (
 	maxBodySize = int64(100 * 1024 * 1024)
 	imgThresholdBytes = 24 * 1024 * 1024
 	jpegQuality = 85
+	faviconURL  = ""
+	faviconHref = ""
 
 	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
 
@@ -67,6 +69,7 @@ var (
 	reFirstLink       = regexp.MustCompile(`(?s)(<link\s[^>]*rel=['"]stylesheet['"][^>]*>)`)
 	reReferencedAsset = regexp.MustCompile(`(?:src|href)=['"](/assets/[^'"]+)['"]`)
 	reSheetUrl        = regexp.MustCompile(`https://docs\.google\.com/spreadsheets/d/[^/"'\''<> ]+`)
+	reFavicon         = regexp.MustCompile(`(?i)<link\b[^>]*\brel=["']?(?:shortcut\s+)?icon["']?[^>]*>`)
 
 	client = &http.Client{
 		Timeout: 60 * time.Second,
@@ -118,6 +121,7 @@ func init() {
 			jpegQuality = n
 		}
 	}
+	faviconURL = os.Getenv("FAVICON_URL")
 	gitRepo = os.Getenv("GIT_REPO")
 	gitPAT = os.Getenv("GIT_PAT")
 	gitEmail = os.Getenv("GIT_EMAIL")
@@ -201,6 +205,10 @@ func commonTransform(html string) string {
 		}
 	}
 
+	if faviconHref != "" {
+		html = reFavicon.ReplaceAllString(html, `<link rel="icon" href="`+faviconHref+`">`)
+	}
+
 	return html
 }
 
@@ -276,6 +284,41 @@ func httpGetRetry(ctx context.Context, rawURL string, maxRetries int) (*http.Res
 		return resp, nil
 	}
 	return nil, lastErr
+}
+
+func fetchFavicon() {
+	if faviconURL == "" {
+		return
+	}
+	fmt.Println("  fetching favicon...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := httpGetRetry(ctx, faviconURL, 2)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  favicon fetch error: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "  favicon fetch: HTTP %d\n", resp.StatusCode)
+		return
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  favicon read error: %v\n", err)
+		return
+	}
+
+	ext := extFromFilename(faviconURL)
+	if ext == "bin" {
+		ext = "ico"
+	}
+
+	dest := filepath.Join(wwwDir, "favicon."+ext)
+	writeFile(dest, data)
+	faviconHref = "/favicon." + ext
+	fmt.Println("  favicon saved as", dest)
 }
 
 func mkdirAll(path string) {
@@ -643,6 +686,8 @@ func generate(ctx context.Context) {
 	mkdirAll(filepath.Join(wwwDir, "assets"))
 	mkdirAll(filepath.Join(wwwDir, "assets", "css"))
 	mkdirAll(filepath.Join(wwwDir, "htmlview", "sheet"))
+
+	fetchFavicon()
 
 	fmt.Println("  fetching main page...")
 	mainHTML := fetchTransformedMain()
