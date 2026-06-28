@@ -39,8 +39,9 @@ var (
 	maxBodySize = int64(100 * 1024 * 1024)
 	imgThresholdBytes = 24 * 1024 * 1024
 	jpegQuality = 85
-	faviconURL  = ""
-	faviconHref = ""
+	faviconURL    = ""
+	faviconHref   = ""
+	analytics = true
 
 	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
 
@@ -99,6 +100,10 @@ func init() {
 		os.Exit(1)
 	}
 	sheetPath = u2.Path
+
+	if v := os.Getenv("ANALYTICS"); v != "" {
+		analytics = v == "true" || v == "1"
+	}
 
 	if d := os.Getenv("WWW_DIR"); d != "" {
 		wwwDir = strings.TrimRight(d, "/")
@@ -207,6 +212,18 @@ func commonTransform(html string) string {
 
 	if faviconHref != "" {
 		html = reFavicon.ReplaceAllString(html, `<link rel="icon" href="`+faviconHref+`">`)
+	}
+
+	if analytics {
+		plausibleScript := `<!-- Privacy-friendly analytics by Plausible -->
+<script async src="https://plausible.canine.tools/js/pa-f1XsnnwjGWohyXy3F7DSp.js"></script>
+<script>
+  window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
+  plausible.init({ domain: window.location.hostname })
+</script>`
+		if idx := strings.Index(html, "</head>"); idx != -1 {
+			html = html[:idx] + plausibleScript + html[idx:]
+		}
 	}
 
 	return html
