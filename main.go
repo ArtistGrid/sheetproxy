@@ -217,12 +217,15 @@ func commonTransform(html string) string {
 	if analytics {
 		plausibleScript := `<!-- Privacy-friendly analytics by Plausible -->
 <script>
-  var defined_domain = window.location.hostname;
-  document.write('<script async data-domain="' + defined_domain + '" src="https://plausible.canine.tools/js/pa-f1XsnnwjGWohyXy3F7DSp.js"><\/script>')
-</script>
-<script>
   window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
   plausible.init()
+</script>
+<script>
+  var s=document.createElement('script');
+  s.defer=true;
+  s.dataset.domain=window.location.hostname;
+  s.src='https://plausible.canine.tools/js/pa-f1XsnnwjGWohyXy3F7DSp.js';
+  (document.head||document.getElementsByTagName('head')[0]).appendChild(s);
 </script>`
 		if idx := strings.Index(html, "</head>"); idx != -1 {
 			html = html[:idx] + plausibleScript + html[idx:]
