@@ -1,0 +1,32 @@
+{
+  "git_pat": "ghp_yourGithubPersonalAccessTokenHere",
+  "git_email": "sheetproxy@local",
+  "git_name": "sheetproxy",
+  "poll_minutes": 10,
+  "concurrency": 8,
+  "mode": "htmlview",
+  "jobs": [
+    {
+      "sheet_id": "1A2b3C4d5E6f7G8h9I0jK1l2M3n4O5p6Q7r8S9t0U",
+      "www_dir": "./www1",
+      "git_repo": "user/tracker-one",
+      "page_title": "Tracker One",
+      "favicon_url": "https://example.com/one-favicon.ico",
+      "analytics": true,
+      "plausible_script": "",
+      "poll_minutes": 10,
+      "mode": "htmlview"
+    },
+    {
+      "sheet_id": "2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7q8R9s0T1u",
+      "www_dir": "./www2",
+      "git_repo": "user/tracker-two",
+      "page_title": "Tracker Two",
+      "favicon_url": "https://example.com/two-favicon.ico",
+      "analytics": false,
+      "plausible_script": "",
+      "poll_minutes": 15,
+      "mode": "preview"
+    }
+  ]
+}
