@@ -7,11 +7,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	he "html"
 	"image"
 	"image/draw"
 	_ "image/gif"
 	"image/png"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -60,6 +62,19 @@ var (
 	reTitle           = regexp.MustCompile(`(?s)<title>(.*?)</title>`)
 	reOgTitle         = regexp.MustCompile(`(?s)<meta\s+property="og:title"\s+content="[^"]*"\s*>`)
 	reOgUrl           = regexp.MustCompile(`(?s)<meta\s+property="og:url"\s+content="[^"]*"\s*>`)
+	reOgImage         = regexp.MustCompile(`(?s)<meta\s+property="og:image"\s+content="([^"]*)"\s*>`)
+	reOgImageType     = regexp.MustCompile(`(?s)<meta\s+property="og:image:type"\s+content="[^"]*"\s*>`)
+	reOgImageWidth    = regexp.MustCompile(`(?s)<meta\s+property="og:image:width"\s+content="[^"]*"\s*>`)
+	reOgImageHeight   = regexp.MustCompile(`(?s)<meta\s+property="og:image:height"\s+content="[^"]*"\s*>`)
+	reTwitterImage    = regexp.MustCompile(`(?s)<meta\s+name="twitter:image"\s+content="[^"]*"\s*>`)
+	reOgType          = regexp.MustCompile(`(?s)<meta\s+property="og:type"\s+content="[^"]*"\s*>`)
+	reOgSiteName      = regexp.MustCompile(`(?s)<meta\s+property="og:site_name"\s+content="[^"]*"\s*>`)
+	reOgDescription   = regexp.MustCompile(`(?s)<meta\s+property="og:description"\s+content="[^"]*"\s*>`)
+	reTwitterCard     = regexp.MustCompile(`(?s)<meta\s+name="twitter:card"\s+content="[^"]*"\s*>`)
+	reCanonical       = regexp.MustCompile(`(?s)<link\s+rel="canonical"\s+href="[^"]*"\s*>`)
+	reMetaDescription = regexp.MustCompile(`(?s)<meta\s+name="description"\s+content="[^"]*"\s*>`)
+	reMetaRobots      = regexp.MustCompile(`(?s)<meta\s+name="robots"\s+content="[^"]*"\s*>`)
+	reHtmlLang        = regexp.MustCompile(`(?s)<html\b[^>]*>`)
 	reDocTitle        = regexp.MustCompile(`(?s)<span\s+class="name">[^<]*</span>`)
 	reReferencedAsset = regexp.MustCompile(`(?:src|href)=['"](/assets/[^'"]+)['"]`)
 	reSheetUrl        = regexp.MustCompile(`https://docs\.google\.com/spreadsheets/d/[^/"'\''<> ]+`)
@@ -88,8 +103,12 @@ type Job struct {
 	FaviconHref     string
 	Analytics       bool
 	PlausibleScript string
+	Lang            string
+	PageDescription string
+	ArtistName      string
 	PollMinutes     int
 	Mode            string
+	LastUpdate      time.Time
 
 	mu            sync.Mutex
 	cssImportSeen sync.Map
@@ -115,6 +134,9 @@ type jobConfig struct {
 	FaviconURL      string `json:"favicon_url"`
 	Analytics       *bool  `json:"analytics"`
 	PlausibleScript string `json:"plausible_script"`
+	Lang            string `json:"lang"`
+	PageDescription string `json:"page_description"`
+	ArtistName      string `json:"artist_name"`
 	PollMinutes     int    `json:"poll_minutes"`
 	Mode            string `json:"mode"`
 }
@@ -142,6 +164,14 @@ func normalizeJob(c jobConfig) (*Job, error) {
 	if title == "" {
 		title = "Frank Tracker"
 	}
+	lang := c.Lang
+	if lang == "" {
+		lang = "en"
+	}
+	artist := c.ArtistName
+	if artist == "" {
+		artist = artistFromTitle(title)
+	}
 	pm := c.PollMinutes
 	if pm <= 0 {
 		pm = pollMinutes
@@ -166,6 +196,9 @@ func normalizeJob(c jobConfig) (*Job, error) {
 		FaviconURL:      c.FaviconURL,
 		Analytics:       analytics,
 		PlausibleScript: c.PlausibleScript,
+		Lang:            lang,
+		PageDescription: c.PageDescription,
+		ArtistName:      artist,
 		PollMinutes:     pm,
 		Mode:            mode,
 	}, nil
@@ -249,6 +282,9 @@ func init() {
 			FaviconURL:      os.Getenv("FAVICON_URL"),
 			Analytics:       &analytics,
 			PlausibleScript: os.Getenv("PLAUSIBLE_SCRIPT"),
+			Lang:            os.Getenv("PAGE_LANG"),
+			PageDescription: os.Getenv("PAGE_DESCRIPTION"),
+			ArtistName:      os.Getenv("ARTIST_NAME"),
 			PollMinutes:     pollMinutes,
 		}}
 	} else {
@@ -325,7 +361,7 @@ func commonTransform(html string, job *Job) string {
 		html = strings.ReplaceAll(html, "/preview/", "/htmlview/")
 	}
 	html = reTelemetry.ReplaceAllString(html, "")
-	html = reImgTag.ReplaceAllString(html, `<img crossorigin="anonymous" referrerpolicy="no-referrer" loading="lazy" decoding="async"`)
+	html = reImgTag.ReplaceAllString(html, `<img crossorigin="anonymous" referrerpolicy="no-referrer" loading="lazy" decoding="async" fetchpriority="low"`)
 	html = rePointerNone.ReplaceAllString(html, `${1}pointer-events:all`)
 	html = reSizeSuffix.ReplaceAllString(html, "=w16383")
 	html = reSupportRedirect.ReplaceAllString(html, "void 0")
@@ -364,6 +400,444 @@ func commonTransform(html string, job *Job) string {
 		}
 	}
 
+	html = injectSEOMeta(html, job)
+	return html
+}
+
+func artistFromTitle(title string) string {
+	title = strings.TrimSpace(title)
+	suffixes := []string{
+		"Tracker", "tracker",
+		"Tracker Sheet", "tracker sheet",
+		"Discography", "discography",
+		"Discography Tracker", "discography tracker",
+		"Discogs", "discogs",
+		"Database", "database",
+	}
+	for _, s := range suffixes {
+		if strings.HasSuffix(title, " "+s) {
+			title = strings.TrimSpace(strings.TrimSuffix(title, " "+s))
+		}
+	}
+	return title
+}
+
+func shortName(artist string) string {
+	artist = strings.TrimSpace(artist)
+	for _, f := range strings.FieldsFunc(artist, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '.'
+	}) {
+		if len(f) >= 3 {
+			return f + " Tracker"
+		}
+	}
+	if len(artist) > 12 {
+		return artist[:12]
+	}
+	return artist
+}
+
+func ogImageType(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".png"):
+		return "image/png"
+	case strings.HasSuffix(path, ".jpg"), strings.HasSuffix(path, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(path, ".webp"):
+		return "image/webp"
+	case strings.HasSuffix(path, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(path, ".svg"):
+		return "image/svg+xml"
+	}
+	return ""
+}
+
+func ensureOgImageDims(html, wwwDir string) string {
+	m := reOgImage.FindStringSubmatch(html)
+	if len(m) < 2 || !strings.HasPrefix(m[1], "/") {
+		return html
+	}
+	f, err := os.Open(filepath.Join(wwwDir, strings.TrimPrefix(m[1], "/")))
+	if err != nil {
+		return html
+	}
+	cfg, _, cerr := image.DecodeConfig(f)
+	f.Close()
+	if cerr != nil || cfg.Width == 0 || cfg.Height == 0 {
+		return html
+	}
+	w := fmt.Sprintf("%d", cfg.Width)
+	h := fmt.Sprintf("%d", cfg.Height)
+	if reOgImageWidth.MatchString(html) {
+		html = reOgImageWidth.ReplaceAllString(html, `<meta property="og:image:width" content="`+w+`">`)
+	} else {
+		tag := reOgImage.FindString(html)
+		html = strings.Replace(html, tag, tag+`<meta property="og:image:width" content="`+w+`">`, 1)
+	}
+	if reOgImageHeight.MatchString(html) {
+		html = reOgImageHeight.ReplaceAllString(html, `<meta property="og:image:height" content="`+h+`">`)
+	} else {
+		tag := reOgImageWidth.FindString(html)
+		html = strings.Replace(html, tag, tag+`<meta property="og:image:height" content="`+h+`">`, 1)
+	}
+	return html
+}
+
+func encodeResizedPNG(src image.Image, size int) ([]byte, bool) {
+	b := src.Bounds()
+	srcW, srcH := b.Dx(), b.Dy()
+	if srcW == 0 || srcH == 0 || size <= 0 {
+		return nil, false
+	}
+	side := srcW
+	if srcH < side {
+		side = srcH
+	}
+	dx, dy := (srcW-side)/2, (srcH-side)/2
+	crop := image.NewRGBA(image.Rect(0, 0, size, size))
+	for y := 0; y < size; y++ {
+		sy := dy + (y * side / size)
+		for x := 0; x < size; x++ {
+			crop.Set(x, y, src.At(dx+(x*side/size), sy))
+		}
+	}
+	var buf bytes.Buffer
+	if png.Encode(&buf, crop) != nil {
+		return nil, false
+	}
+	return buf.Bytes(), true
+}
+
+func pwaIcons(job *Job, ogImage string) []map[string]string {
+	var icons []map[string]string
+	appendRef := func(src, sizes, purpose string) {
+		ic := map[string]string{"src": src, "sizes": sizes, "purpose": purpose}
+		if t := ogImageType(src); t != "" {
+			ic["type"] = t
+		}
+		icons = append(icons, ic)
+	}
+
+	if job.FaviconHref != "" {
+		appendRef(job.FaviconHref, "any", "any")
+	}
+	if ogImage == "" {
+		return icons
+	}
+
+	var img image.Image
+	if f, err := os.Open(filepath.Join(job.WwwDir, strings.TrimPrefix(ogImage, "/"))); err == nil {
+		if dec, _, derr := image.Decode(f); derr == nil {
+			img = dec
+		}
+		f.Close()
+	}
+
+	if img != nil {
+		for _, s := range []int{180, 192, 512} {
+			if data, ok := encodeResizedPNG(img, s); ok {
+				name := fmt.Sprintf("icon-%d.png", s)
+				writeFile(filepath.Join(job.WwwDir, name), data)
+				appendRef("/"+name, fmt.Sprintf("%dx%d", s, s), "any")
+			}
+		}
+		if data, ok := encodeResizedPNG(img, 512); ok {
+			writeFile(filepath.Join(job.WwwDir, "icon-maskable-512.png"), data)
+			appendRef("/icon-maskable-512.png", "512x512", "maskable")
+		}
+	}
+
+	appendRef(ogImage, "1200x630", "any")
+	return icons
+}
+
+func encodeCoverPNG(src image.Image, w, h int) ([]byte, bool) {
+	b := src.Bounds()
+	sw, sh := b.Dx(), b.Dy()
+	if sw == 0 || sh == 0 || w <= 0 || h <= 0 {
+		return nil, false
+	}
+	scale := math.Max(float64(w)/float64(sw), float64(h)/float64(sh))
+	tw := int(math.Round(float64(sw) * scale))
+	th := int(math.Round(float64(sh) * scale))
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		sy := int(float64(y) * float64(th) / float64(h))
+		for x := 0; x < w; x++ {
+			sx := int(float64(x) * float64(tw) / float64(w))
+			if sx < sw && sy < sh {
+				out.Set(x, y, src.At(sx, sy))
+			}
+		}
+	}
+	var buf bytes.Buffer
+	if png.Encode(&buf, out) != nil {
+		return nil, false
+	}
+	return buf.Bytes(), true
+}
+
+func ensureOgCard(html, wwwDir string) string {
+	m := reOgImage.FindStringSubmatch(html)
+	if len(m) < 2 || !strings.HasPrefix(m[1], "/") {
+		return html
+	}
+	f, err := os.Open(filepath.Join(wwwDir, strings.TrimPrefix(m[1], "/")))
+	if err != nil {
+		return html
+	}
+	img, _, derr := image.Decode(f)
+	f.Close()
+	if derr != nil {
+		return html
+	}
+	data, ok := encodeCoverPNG(img, 1200, 630)
+	if !ok {
+		return html
+	}
+	writeFile(filepath.Join(wwwDir, "og-card.png"), data)
+	html = reOgImage.ReplaceAllString(html, `<meta property="og:image" content="/og-card.png">`)
+	html = reOgImageType.ReplaceAllString(html, `<meta property="og:image:type" content="image/png">`)
+	html = reOgImageWidth.ReplaceAllString(html, `<meta property="og:image:width" content="1200">`)
+	html = reOgImageHeight.ReplaceAllString(html, `<meta property="og:image:height" content="630">`)
+	if reTwitterImage.MatchString(html) {
+		html = reTwitterImage.ReplaceAllString(html, `<meta name="twitter:image" content="/og-card.png">`)
+	}
+	return html
+}
+
+func ensureAppleTouchIcon(html, wwwDir string) string {
+	if _, err := os.Stat(filepath.Join(wwwDir, "icon-180.png")); err != nil {
+		return html
+	}
+	if strings.Contains(html, `apple-touch-icon" sizes="180x180"`) {
+		return html
+	}
+	link := `<link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png">`
+	if idx := strings.Index(html, "</head>"); idx != -1 {
+		html = html[:idx] + link + "\n" + html[idx:]
+	}
+	return html
+}
+
+func ensureOgImageType(html string) string {
+	img := reOgImage.FindStringSubmatch(html)
+	if len(img) < 2 {
+		return html
+	}
+	t := ogImageType(img[1])
+	if t == "" {
+		return html
+	}
+	if reOgImageType.MatchString(html) {
+		return reOgImageType.ReplaceAllString(html, `<meta property="og:image:type" content="`+t+`">`)
+	}
+	tag := reOgImage.FindString(html)
+	return strings.Replace(html, tag, tag+`<meta property="og:image:type" content="`+t+`">`, 1)
+}
+
+func injectSEOMeta(html string, job *Job) string {
+	artist, desc, escTitle, escDesc, _ := pageSEO(job)
+	escArtist := he.EscapeString(artist)
+
+	ogImage := ""
+	if m := reOgImage.FindStringSubmatch(html); len(m) > 1 {
+		ogImage = m[1]
+	}
+
+	var b strings.Builder
+	b.WriteString(`<meta name="description" content="` + escDesc + `">` + "\n")
+	b.WriteString(`<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">` + "\n")
+	b.WriteString(`<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">` + "\n")
+	b.WriteString(`<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1">` + "\n")
+	b.WriteString(`	<link rel="manifest" href="/manifest.webmanifest">` + "\n")
+	if ogImage != "" {
+		b.WriteString(`<link rel="apple-touch-icon" href="` + he.EscapeString(ogImage) + `">` + "\n")
+	}
+	if job.PlausibleScript != "" {
+		if pu, perr := url.Parse(job.PlausibleScript); perr == nil && pu.Host != "" {
+			b.WriteString(`<link rel="preconnect" href="https://` + pu.Host + `">` + "\n")
+			b.WriteString(`<link rel="dns-prefetch" href="https://` + pu.Host + `">` + "\n")
+		}
+	}
+	b.WriteString(`<link rel="dns-prefetch" href="https://www.gstatic.com">` + "\n")
+	b.WriteString(`<link rel="dns-prefetch" href="https://docs.google.com">` + "\n")
+	b.WriteString(`<meta name="author" content="` + escTitle + `">` + "\n")
+	b.WriteString(`<meta name="application-name" content="` + escTitle + `">` + "\n")
+	b.WriteString(`<meta name="theme-color" content="#111111" media="(prefers-color-scheme: dark)">` + "\n")
+	b.WriteString(`<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">` + "\n")
+	b.WriteString(`<meta name="color-scheme" content="light dark">` + "\n")
+	b.WriteString(`<meta name="format-detection" content="telephone=no">` + "\n")
+	b.WriteString(`<meta name="msapplication-TileColor" content="#111111">` + "\n")
+	if ogImage != "" {
+		b.WriteString(`<meta name="msapplication-TileImage" content="` + he.EscapeString(ogImage) + `">` + "\n")
+	}
+	b.WriteString(`<meta name="apple-mobile-web-app-capable" content="yes">` + "\n")
+	b.WriteString(`<meta name="apple-mobile-web-app-title" content="` + escTitle + `">` + "\n")
+	b.WriteString(`<meta name="apple-mobile-web-app-status-bar-style" content="default">` + "\n")
+	b.WriteString(`<meta name="mobile-web-app-capable" content="yes">` + "\n")
+	b.WriteString(`<meta name="handheldfriendly" content="true">` + "\n")
+	b.WriteString(`<meta name="MobileOptimized" content="width">` + "\n")
+	keywords := strings.Join([]string{
+		artist + " tracker",
+		artist + " discography",
+		artist + " unreleased discography",
+		artist + " unreleased music",
+		artist + " music leaks",
+		artist + " leaks",
+		artist + " grails",
+		artist + " new music",
+		"unreleased discography",
+		"discography tracker",
+		"music leaks",
+		"leaks",
+	}, ", ")
+	b.WriteString(`<meta name="keywords" content="` + he.EscapeString(keywords) + `">` + "\n")
+	dctermsDate := ""
+	if !job.LastUpdate.IsZero() {
+		dctermsDate = job.LastUpdate.Format(time.RFC3339)
+	}
+	b.WriteString(`<meta name="dcterms.title" content="` + escTitle + `">` + "\n")
+	b.WriteString(`<meta name="dcterms.creator" content="` + escTitle + `">` + "\n")
+	b.WriteString(`<meta name="dcterms.subject" content="` + he.EscapeString(keywords) + `">` + "\n")
+	b.WriteString(`<meta name="dcterms.description" content="` + escDesc + `">` + "\n")
+	b.WriteString(`<meta name="dcterms.language" content="` + job.Lang + `">` + "\n")
+	b.WriteString(`<meta name="dcterms.type" content="Text">` + "\n")
+	if dctermsDate != "" {
+		b.WriteString(`<meta name="dcterms.date" content="` + dctermsDate + `">` + "\n")
+		b.WriteString(`<meta name="dcterms.modified" content="` + dctermsDate + `">` + "\n")
+	}
+	b.WriteString(`<meta property="og:type" content="website">` + "\n")
+	b.WriteString(`<meta property="og:locale" content="en_US">` + "\n")
+	b.WriteString(`<meta property="og:site_name" content="` + escTitle + `">` + "\n")
+	b.WriteString(`<meta property="og:title" content="` + escTitle + `">` + "\n")
+	b.WriteString(`<meta property="og:description" content="` + escDesc + `">` + "\n")
+	if !job.LastUpdate.IsZero() {
+		ts := job.LastUpdate.Format(time.RFC3339)
+		b.WriteString(`<meta property="og:updated_time" content="` + ts + `">` + "\n")
+		b.WriteString(`<meta property="article:modified_time" content="` + ts + `">` + "\n")
+	}
+	if ogImage != "" {
+		b.WriteString(`<meta property="og:image" content="` + he.EscapeString(ogImage) + `">` + "\n")
+		b.WriteString(`<meta property="og:image:alt" content="` + escTitle + `">` + "\n")
+		if t := ogImageType(ogImage); t != "" {
+			b.WriteString(`<meta property="og:image:type" content="` + t + `">` + "\n")
+		}
+		b.WriteString(`<meta name="twitter:card" content="summary_large_image">` + "\n")
+		b.WriteString(`<meta name="twitter:image" content="` + he.EscapeString(ogImage) + `">` + "\n")
+		b.WriteString(`<meta name="twitter:image:alt" content="` + escTitle + `">` + "\n")
+	} else {
+		b.WriteString(`<meta name="twitter:card" content="summary">` + "\n")
+	}
+	b.WriteString(`<meta name="twitter:title" content="` + escTitle + `">` + "\n")
+	b.WriteString(`<meta name="twitter:description" content="` + escDesc + `">` + "\n")
+	b.WriteString(`<meta name="twitter:label1" content="Artist">` + "\n")
+	b.WriteString(`<meta name="twitter:data1" content="` + escArtist + `">` + "\n")
+	b.WriteString(`<meta name="twitter:label2" content="Covers">` + "\n")
+	b.WriteString(`<meta name="twitter:data2" content="Released + unreleased + leaks">` + "\n")
+
+	knowsTopics := []string{
+		artist + " discography",
+		artist + " unreleased music",
+		artist + " music leaks",
+		"released and unreleased music",
+		"tracking leaks",
+	}
+	var kw []string
+	for _, k := range knowsTopics {
+		kw = append(kw, strconv.Quote(k))
+	}
+	jsonArtist := strconv.Quote(escArtist)
+	jsonTitle := strconv.Quote(escTitle)
+	jsonDesc := strconv.Quote(escDesc)
+	jsonKnows := "[" + strings.Join(kw, ",") + "]"
+	jsonImgRef := ""
+	if ogImage != "" {
+		jsonImgRef = `,"image":` + strconv.Quote(ogImage)
+	}
+	jsonImgObj := ""
+	if ogImage != "" {
+		jsonImgObj = `,"primaryImageOfPage":{"@type":"ImageObject","contentUrl":` + strconv.Quote(ogImage) + `}`
+	}
+	jsonLogoObj := ""
+	if ogImage != "" {
+		jsonLogoObj = `,"logo":{"@type":"ImageObject","contentUrl":` + strconv.Quote(ogImage) + `}`
+	}
+	jsonDate := ""
+	if !job.LastUpdate.IsZero() {
+		jsonDate = `,"dateModified":` + strconv.Quote(job.LastUpdate.Format(time.RFC3339))
+	}
+	lang := job.Lang
+	if lang == "" {
+		lang = "en"
+	}
+
+	var jd strings.Builder
+	jd.WriteString(`{"@context":"https://schema.org","@graph":[`)
+
+	// Artist
+	jd.WriteString(`{"@type":"MusicGroup","@id":"#artist","name":` + jsonArtist + `,"alternateName":` + jsonTitle + `,"description":` + jsonDesc + `,"knowsAbout":` + jsonKnows + jsonImgRef + `,"inLanguage":` + strconv.Quote(lang) + `,"member":{"@id":"#person"},"subjectOf":{"@id":"#webpage"}}`)
+
+	// Person (the artist as a person)
+	jd.WriteString(`,{"@type":"Person","@id":"#person","name":` + jsonArtist + `,"alternateName":` + jsonTitle + `,"description":` + jsonDesc + `,"knowsAbout":` + jsonKnows + `,"memberOf":{"@id":"#artist"}}`)
+
+	// WebPage (main content, publisher organization)
+	jd.WriteString(`,{"@type":"WebPage","@id":"#webpage","name":` + jsonTitle +
+		`,"description":` + jsonDesc + `,"about":` + jsonKnows +
+		`,"inLanguage":` + strconv.Quote(lang) + jsonDate +
+		`,"isFamilyFriendly":true,"mainEntity":{"@id":"#artist"},"isPartOf":{"@id":"#website"},"publisher":{"@id":"#org"}` +
+		jsonImgObj + `}`)
+
+	// WebSite
+	jd.WriteString(`,{"@type":"WebSite","@id":"#website","name":` + jsonTitle + `,"alternateName":` + jsonArtist + `,"description":` + jsonDesc + `,"inLanguage":` + strconv.Quote(lang) + jsonDate + `,"publisher":{"@id":"#org"}}`)
+
+	// Organization (publisher)
+	jd.WriteString(`,{"@type":"Organization","@id":"#org","name":` + jsonTitle + `,"description":` + jsonDesc + `,"inLanguage":` + strconv.Quote(lang) + `,"knowsAbout":` + jsonKnows + jsonLogoObj + `}`)
+
+	// Dataset (the tracker content as a dataset)
+	jd.WriteString(`,{"@type":"Dataset","name":` + jsonTitle + `,"description":` + jsonDesc + `,"creator":{"@id":"#artist"},"provider":{"@id":"#org"},"about":` + jsonKnows + `,"inLanguage":` + strconv.Quote(lang) + jsonDate + `,"keywords":` + strconv.Quote(strings.Join([]string{artist + " discography", "unreleased music", "music leaks"}, ", ")) + `}`)
+
+	// Breadcrumbs
+	jd.WriteString(`,{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":` + jsonTitle + `}]}`)
+
+	// FAQPage
+	faqQ1 := "What is the " + job.PageTitle + "?"
+	faqA1 := desc
+	faqQ2 := "Where can I find " + artist + "'s unreleased music and leaks?"
+	faqA2 := "The " + job.PageTitle + " collects and tracks " + artist + "'s unreleased and released discography, including unreleased music and leaks, in one place."
+	faqQ3 := "Does the " + job.PageTitle + " cover released music too?"
+	faqA3 := "Yes — the tracker covers both released albums and singles and unreleased music and leaks."
+	faqQ4 := "How often is the " + job.PageTitle + " updated?"
+	faqA4 := "The tracker updates automatically, so new releases, leaks and news appear shortly after they happen."
+	jd.WriteString(`,{"@type":"FAQPage","@id":"#faq","mainEntity":[{"@type":"Question","name":` + strconv.Quote(faqQ1) + `,"acceptedAnswer":{"@type":"Answer","text":` + strconv.Quote(faqA1) + `}},`)
+	jd.WriteString(`{"@type":"Question","name":` + strconv.Quote(faqQ2) + `,"acceptedAnswer":{"@type":"Answer","text":` + strconv.Quote(faqA2) + `}},`)
+	jd.WriteString(`{"@type":"Question","name":` + strconv.Quote(faqQ3) + `,"acceptedAnswer":{"@type":"Answer","text":` + strconv.Quote(faqA3) + `}},`)
+	jd.WriteString(`{"@type":"Question","name":` + strconv.Quote(faqQ4) + `,"acceptedAnswer":{"@type":"Answer","text":` + strconv.Quote(faqA4) + `}}]}`)
+
+	jd.WriteString(`]}`)
+	b.WriteString(`<script type="application/ld+json">` + jd.String() + `</script>` + "\n")
+
+	html = reOgImage.ReplaceAllString(html, "")
+	html = reOgType.ReplaceAllString(html, "")
+	html = reOgSiteName.ReplaceAllString(html, "")
+	html = reOgDescription.ReplaceAllString(html, "")
+	html = reOgTitle.ReplaceAllString(html, "")
+	html = reOgUrl.ReplaceAllString(html, "")
+	html = reTwitterCard.ReplaceAllString(html, "")
+	html = reCanonical.ReplaceAllString(html, "")
+	html = reMetaDescription.ReplaceAllString(html, "")
+	html = reMetaRobots.ReplaceAllString(html, "")
+	html = reHtmlLang.ReplaceAllStringFunc(html, func(match string) string {
+		if strings.Contains(match, "lang=") {
+			return match
+		}
+		return strings.TrimSuffix(match, ">") + ` lang="` + job.Lang + `" dir="ltr">`
+	})
+
+	if idx := strings.Index(html, "</head>"); idx != -1 {
+		html = html[:idx] + b.String() + html[idx:]
+	}
 	return html
 }
 
@@ -958,6 +1432,112 @@ func cleanupStaleAssets(referenced map[string]bool, wwwDir string) {
 	}
 }
 
+func pageSEO(job *Job) (artist, desc, escTitle, escDesc, short string) {
+	artist = strings.TrimSpace(job.ArtistName)
+	if artist == "" {
+		artist = artistFromTitle(job.PageTitle)
+	}
+	if artist == "" {
+		artist = job.PageTitle
+	}
+	desc = job.PageDescription
+	if desc == "" {
+		desc = "View and explore " + artist + "'s unreleased and released discography and music leaks on " + job.PageTitle + "."
+	}
+	escTitle = he.EscapeString(job.PageTitle)
+	escDesc = he.EscapeString(desc)
+	short = shortName(artist)
+	return artist, desc, escTitle, escDesc, short
+}
+
+func writePWAOutputs(job *Job, ogImage string) {
+	artist, desc, _, _, short := pageSEO(job)
+
+	icons := pwaIcons(job, ogImage)
+
+	manifest := map[string]interface{}{
+		"id":               "./",
+		"name":             job.PageTitle,
+		"short_name":       short,
+		"description":      desc,
+		"start_url":        "./",
+		"scope":            "./",
+		"display":          "standalone",
+		"display_override": []string{"standalone", "minimal-ui"},
+		"orientation":      "any",
+		"background_color": "#111111",
+		"theme_color":      "#111111",
+		"lang":             job.Lang,
+		"icons":            icons,
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err == nil {
+		writeFile(filepath.Join(job.WwwDir, "manifest.webmanifest"), data)
+	}
+
+	llms := "# " + job.PageTitle + "\n\n" +
+		"> " + desc + "\n\n" +
+		artist + " is the subject of this tracker. Here you can explore and stay up to date on the full discography — released and unreleased music, leaks, news and releases — all in one place.\n\n" +
+		"## Key topics\n\n" +
+		"- " + artist + " discography\n" +
+		"- " + artist + " unreleased music\n" +
+		"- " + artist + " music leaks\n" +
+		"- " + artist + " news and releases\n" +
+		"- tracking unreleased and leaked music\n\n" +
+		"## About\n\n" +
+		"The " + job.PageTitle + " is a curated, community-maintained tracker of " + artist + "'s music catalog. It covers released albums and singles as well as unreleased music, demos, snippets and leaks, updated regularly.\n\n" +
+		"## Optional\n\n" +
+		"Use this site to find out what " + artist + " has released, what is unreleased or leaked, and to follow news about new music."
+	writeFile(filepath.Join(job.WwwDir, "llms.txt"), []byte(llms))
+
+	llmsFull := "# " + job.PageTitle + " (full)\n\n" +
+		"> " + desc + "\n\n" +
+		"## About\n\n" +
+		artist + " is the subject of this tracker. The " + job.PageTitle + " documents the complete music catalog of " + artist + " in a single, community-maintained dataset.\n\n" +
+		"## Content\n\n" +
+		"- Released albums and singles\n" +
+		"- Unreleased music, demos, snippets and leaks\n" +
+		"- News and release announcements\n" +
+		"- Community notes on status and availability\n\n" +
+		"## Key topics\n\n" +
+		"- " + artist + " discography\n" +
+		"- " + artist + " unreleased music\n" +
+		"- " + artist + " music leaks\n" +
+		"- " + artist + " news and releases\n" +
+		"- tracking unreleased and leaked music\n"
+	writeFile(filepath.Join(job.WwwDir, "llms-full.txt"), []byte(llmsFull))
+
+	txt := `User-agent: *
+Allow: /
+
+# AI and answer-engine crawlers
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+`
+	writeFile(filepath.Join(job.WwwDir, "robots.txt"), []byte(txt))
+}
+
 func generate(ctx context.Context, job *Job) {
 	job.mu.Lock()
 	defer job.mu.Unlock()
@@ -971,6 +1551,8 @@ func generate(ctx context.Context, job *Job) {
 	mkdirAll(filepath.Join(job.WwwDir, "assets"))
 	mkdirAll(filepath.Join(job.WwwDir, "assets", "css"))
 	mkdirAll(filepath.Join(job.WwwDir, job.Mode, "sheet"))
+
+	job.LastUpdate = time.Now().UTC()
 
 	fetchFavicon(job)
 
@@ -1095,7 +1677,33 @@ func generate(ctx context.Context, job *Job) {
 		tabs[i].html = localizeInlineStyles(tabs[i].html, job)
 	}
 
+	mainHTML = ensureOgImageType(mainHTML)
+	for i := range tabs {
+		tabs[i].html = ensureOgImageType(tabs[i].html)
+	}
+
+	mainHTML = ensureOgCard(mainHTML, job.WwwDir)
+	for i := range tabs {
+		tabs[i].html = ensureOgCard(tabs[i].html, job.WwwDir)
+	}
+
+	mainHTML = ensureOgImageDims(mainHTML, job.WwwDir)
+	for i := range tabs {
+		tabs[i].html = ensureOgImageDims(tabs[i].html, job.WwwDir)
+	}
+
 	referencedAssets := collectReferencedAssets(job.WwwDir, mainHTML, tabs)
+
+	ogImage := ""
+	if m := reOgImage.FindStringSubmatch(mainHTML); len(m) > 1 {
+		ogImage = m[1]
+	}
+	writePWAOutputs(job, ogImage)
+
+	mainHTML = ensureAppleTouchIcon(mainHTML, job.WwwDir)
+	for i := range tabs {
+		tabs[i].html = ensureAppleTouchIcon(tabs[i].html, job.WwwDir)
+	}
 
 	writeFile(filepath.Join(job.WwwDir, "index.html"), []byte(mainHTML))
 	for _, t := range tabs {
