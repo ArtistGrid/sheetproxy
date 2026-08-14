@@ -378,14 +378,14 @@ func commonTransform(html string, job *Job) string {
 	})
 
 	html = strings.ReplaceAll(html, `"docs-Helvetica Neue"`, `"Helvetica Neue"`)
-	html = reTitle.ReplaceAllString(html, `<title>`+job.PageTitle+`</title>`)
+	html = reTitle.ReplaceAllLiteralString(html, `<title>`+job.PageTitle+`</title>`)
 	html = reOgUrl.ReplaceAllString(html, "")
 	html = reSheetUrl.ReplaceAllString(html, "")
-	html = reOgTitle.ReplaceAllString(html, `<meta property="og:title" content="`+job.PageTitle+`">`)
-	html = reDocTitle.ReplaceAllString(html, `<span class="name">`+job.PageTitle+`</span>`)
+	html = reOgTitle.ReplaceAllLiteralString(html, `<meta property="og:title" content="`+job.PageTitle+`">`)
+	html = reDocTitle.ReplaceAllLiteralString(html, `<span class="name">`+job.PageTitle+`</span>`)
 
 	if job.FaviconHref != "" {
-		html = reFavicon.ReplaceAllString(html, `<link rel="icon" href="`+job.FaviconHref+`">`)
+		html = reFavicon.ReplaceAllLiteralString(html, `<link rel="icon" href="`+job.FaviconHref+`">`)
 	}
 
 	if job.Analytics && job.PlausibleScript != "" {

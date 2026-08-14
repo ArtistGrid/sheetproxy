@@ -474,3 +474,18 @@ func TestInjectSEOMetaNoSiteURL(t *testing.T) {
 		t.Error("html lang attribute not injected")
 	}
 }
+
+func TestPageTitleWithDollarSign(t *testing.T) {
+	job := &Job{Mode: "htmlview", PageTitle: "A$AP Rocky Tracker", Lang: "en"}
+	html := `<html><head><title>Original Title</title><meta property="og:title" content="Original Title"></head><body><span class="name">Original Title</span></body></html>`
+	got := commonTransform(html, job)
+	if !strings.Contains(got, `<title>A$AP Rocky Tracker</title>`) {
+		t.Errorf("<title> was corrupted, got: %s", got)
+	}
+	if !strings.Contains(got, `<meta property="og:title" content="A$AP Rocky Tracker">`) {
+		t.Errorf("<meta og:title> was corrupted, got: %s", got)
+	}
+	if !strings.Contains(got, `<span class="name">A$AP Rocky Tracker</span>`) {
+		t.Errorf("<span class=\"name\"> was corrupted, got: %s", got)
+	}
+}
