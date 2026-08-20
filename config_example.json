@@ -15,6 +15,7 @@
       "artist_name": "Tracker One",
       "lang": "en",
       "favicon_url": "https://example.com/one-favicon.ico",
+      "embed_image_url": "https://example.com/one-embed.png",
       "analytics": true,
       "plausible_script": "",
       "poll_minutes": 10,

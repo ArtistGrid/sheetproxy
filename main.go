@@ -101,6 +101,8 @@ type Job struct {
 	PageTitle       string
 	FaviconURL      string
 	FaviconHref     string
+	EmbedImageURL   string
+	EmbedImageHref  string
 	Analytics       bool
 	PlausibleScript string
 	Lang            string
@@ -132,6 +134,7 @@ type jobConfig struct {
 	GitRepo         string `json:"git_repo"`
 	PageTitle       string `json:"page_title"`
 	FaviconURL      string `json:"favicon_url"`
+	EmbedImageURL   string `json:"embed_image_url"`
 	Analytics       *bool  `json:"analytics"`
 	PlausibleScript string `json:"plausible_script"`
 	Lang            string `json:"lang"`
@@ -194,6 +197,7 @@ func normalizeJob(c jobConfig) (*Job, error) {
 		GitRepo:         c.GitRepo,
 		PageTitle:       title,
 		FaviconURL:      c.FaviconURL,
+		EmbedImageURL:   c.EmbedImageURL,
 		Analytics:       analytics,
 		PlausibleScript: c.PlausibleScript,
 		Lang:            lang,
@@ -280,6 +284,7 @@ func init() {
 			GitRepo:         os.Getenv("GIT_REPO"),
 			PageTitle:       os.Getenv("PAGE_TITLE"),
 			FaviconURL:      os.Getenv("FAVICON_URL"),
+			EmbedImageURL:   os.Getenv("EMBED_IMAGE_URL"),
 			Analytics:       &analytics,
 			PlausibleScript: os.Getenv("PLAUSIBLE_SCRIPT"),
 			Lang:            os.Getenv("PAGE_LANG"),
@@ -954,6 +959,44 @@ func fetchFavicon(job *Job) {
 	fmt.Println("  favicon saved as", dest)
 }
 
+func fetchEmbedImage(job *Job) {
+	if job.EmbedImageURL == "" {
+		return
+	}
+	fmt.Println("  fetching embed image...")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	resp, err := httpGetRetry(ctx, job.EmbedImageURL, 3)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  embed image fetch error: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "  embed image fetch: HTTP %d\n", resp.StatusCode)
+		return
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  embed image read error: %v\n", err)
+		return
+	}
+
+	ext := extFromContentType(resp.Header.Get("Content-Type"))
+	if ext == "" {
+		ext = extFromFilename(job.EmbedImageURL)
+	}
+	if ext == "" || ext == "bin" {
+		ext = "png"
+	}
+
+	dest := filepath.Join(job.WwwDir, "embed."+ext)
+	writeFile(dest, data)
+	job.EmbedImageHref = "/embed." + ext
+	fmt.Println("  embed image saved as", dest)
+}
+
 func mkdirAll(path string) {
 	if err := os.MkdirAll(path, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "  mkdir %s: %v\n", path, err)
@@ -1555,6 +1598,7 @@ func generate(ctx context.Context, job *Job) {
 	job.LastUpdate = time.Now().UTC()
 
 	fetchFavicon(job)
+	fetchEmbedImage(job)
 
 	fmt.Println("  fetching main page...")
 	mainHTML := fetchTransformedMain(job)
@@ -1703,6 +1747,16 @@ func generate(ctx context.Context, job *Job) {
 	mainHTML = ensureAppleTouchIcon(mainHTML, job.WwwDir)
 	for i := range tabs {
 		tabs[i].html = ensureAppleTouchIcon(tabs[i].html, job.WwwDir)
+	}
+
+	if job.EmbedImageHref != "" {
+		embedTag := `<meta property="og:image" content="` + job.EmbedImageHref + `">`
+		mainHTML = reOgImage.ReplaceAllString(mainHTML, embedTag)
+		mainHTML = reTwitterImage.ReplaceAllString(mainHTML, `<meta name="twitter:image" content="`+job.EmbedImageHref+`">`)
+		for i := range tabs {
+			tabs[i].html = reOgImage.ReplaceAllString(tabs[i].html, embedTag)
+			tabs[i].html = reTwitterImage.ReplaceAllString(tabs[i].html, `<meta name="twitter:image" content="`+job.EmbedImageHref+`">`)
+		}
 	}
 
 	writeFile(filepath.Join(job.WwwDir, "index.html"), []byte(mainHTML))
