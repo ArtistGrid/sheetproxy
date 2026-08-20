@@ -102,7 +102,7 @@ type Job struct {
 	FaviconURL      string
 	FaviconHref     string
 	EmbedImageURL   string
-	EmbedImageHref  string
+	HasOgCard       bool
 	Analytics       bool
 	PlausibleScript string
 	Lang            string
@@ -983,17 +983,9 @@ func fetchEmbedImage(job *Job) {
 		return
 	}
 
-	ext := extFromContentType(resp.Header.Get("Content-Type"))
-	if ext == "" {
-		ext = extFromFilename(job.EmbedImageURL)
-	}
-	if ext == "" || ext == "bin" {
-		ext = "png"
-	}
-
-	dest := filepath.Join(job.WwwDir, "embed."+ext)
+	dest := filepath.Join(job.WwwDir, "og-card.png")
 	writeFile(dest, data)
-	job.EmbedImageHref = "/embed." + ext
+	job.HasOgCard = true
 	fmt.Println("  embed image saved as", dest)
 }
 
@@ -1726,9 +1718,11 @@ func generate(ctx context.Context, job *Job) {
 		tabs[i].html = ensureOgImageType(tabs[i].html)
 	}
 
-	mainHTML = ensureOgCard(mainHTML, job.WwwDir)
-	for i := range tabs {
-		tabs[i].html = ensureOgCard(tabs[i].html, job.WwwDir)
+	if !job.HasOgCard {
+		mainHTML = ensureOgCard(mainHTML, job.WwwDir)
+		for i := range tabs {
+			tabs[i].html = ensureOgCard(tabs[i].html, job.WwwDir)
+		}
 	}
 
 	mainHTML = ensureOgImageDims(mainHTML, job.WwwDir)
@@ -1749,13 +1743,13 @@ func generate(ctx context.Context, job *Job) {
 		tabs[i].html = ensureAppleTouchIcon(tabs[i].html, job.WwwDir)
 	}
 
-	if job.EmbedImageHref != "" {
-		embedTag := `<meta property="og:image" content="` + job.EmbedImageHref + `">`
-		mainHTML = reOgImage.ReplaceAllString(mainHTML, embedTag)
-		mainHTML = reTwitterImage.ReplaceAllString(mainHTML, `<meta name="twitter:image" content="`+job.EmbedImageHref+`">`)
+	if job.HasOgCard {
+		ogCardTag := `<meta property="og:image" content="/og-card.png">`
+		mainHTML = reOgImage.ReplaceAllString(mainHTML, ogCardTag)
+		mainHTML = reTwitterImage.ReplaceAllString(mainHTML, `<meta name="twitter:image" content="/og-card.png">`)
 		for i := range tabs {
-			tabs[i].html = reOgImage.ReplaceAllString(tabs[i].html, embedTag)
-			tabs[i].html = reTwitterImage.ReplaceAllString(tabs[i].html, `<meta name="twitter:image" content="`+job.EmbedImageHref+`">`)
+			tabs[i].html = reOgImage.ReplaceAllString(tabs[i].html, ogCardTag)
+			tabs[i].html = reTwitterImage.ReplaceAllString(tabs[i].html, `<meta name="twitter:image" content="/og-card.png">`)
 		}
 	}
 
