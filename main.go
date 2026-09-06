@@ -1489,9 +1489,10 @@ func stripSheetURLs(html, sheetPath string) string {
 	segments := splitOutsideScripts(html)
 	for i, seg := range segments {
 		if seg.inScript {
-			continue
+			segments[i].text = stripScriptExceptPageURLs(seg.text, prefix, modes)
+		} else {
+			segments[i].text = stripPrefix(seg.text, prefix, modes)
 		}
-		segments[i].text = stripPrefix(seg.text, prefix, modes)
 	}
 
 	var b strings.Builder
@@ -1499,6 +1500,39 @@ func stripSheetURLs(html, sheetPath string) string {
 		b.WriteString(seg.text)
 	}
 	return b.String()
+}
+
+var rePageURLKey = regexp.MustCompile(`(?i)pageUrl\s*:\s*"`)
+
+func stripScriptExceptPageURLs(script, prefix string, modes []string) string {
+	protected := pageURLValueRanges(script)
+	if len(protected) == 0 {
+		return stripPrefix(script, prefix, modes)
+	}
+
+	var b strings.Builder
+	idx := 0
+	for _, p := range protected {
+		b.WriteString(stripPrefix(script[idx:p.start], prefix, modes))
+		b.WriteString(script[p.start:p.end])
+		idx = p.end
+	}
+	b.WriteString(stripPrefix(script[idx:], prefix, modes))
+	return b.String()
+}
+
+func pageURLValueRanges(script string) []struct{ start, end int } {
+	var ranges []struct{ start, end int }
+	for _, loc := range rePageURLKey.FindAllStringIndex(script, -1) {
+		urlStart := loc[1]
+		close := strings.Index(script[urlStart:], `"`)
+		if close < 0 {
+			break
+		}
+		urlEnd := urlStart + close
+		ranges = append(ranges, struct{ start, end int }{urlStart, urlEnd})
+	}
+	return ranges
 }
 
 type htmlSegment struct {
