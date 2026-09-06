@@ -155,25 +155,28 @@ func TestStripSheetURLsPreservesCellLinks(t *testing.T) {
 	}
 }
 
-func TestStripSheetURLsSkipsScriptBlocks(t *testing.T) {
+func TestStripSheetURLsStripsIframeURLs(t *testing.T) {
 	sheetPath := "/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA"
 	iframeURL := `https://docs.google.com/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA/htmlview/sheet/713654230.html`
-	otherScriptURL := `https://docs.google.com/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA/htmlview/sheet/999999999.html`
+	escapedIframeURL := `https:\/\/docs.google.com\/spreadsheets\/d\/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA\/htmlview\/sheet\/713654230.html`
 	in := `<html><head><script>
 items.push({pageUrl: "` + iframeURL + `", gid: "713654230"});
-var other = "` + otherScriptURL + `";
+items.push({pageUrl: "` + escapedIframeURL + `", gid: "713654230"});
 </script></head><body>` +
 		`<a href="` + iframeURL + `">nav</a>` +
 		`</body></html>`
 	got := stripSheetURLs(in, sheetPath)
-	if !strings.Contains(got, iframeURL) {
-		t.Errorf("pageUrl inside <script> should NOT be stripped (iframe target), got:\n%s", got)
+	if strings.Contains(got, iframeURL) {
+		t.Errorf("iframe pageUrl should be stripped, got:\n%s", got)
 	}
-	if strings.Contains(got, otherScriptURL) {
-		t.Errorf("non-pageUrl sheet URL inside <script> SHOULD be stripped, got:\n%s", got)
+	if strings.Contains(got, escapedIframeURL) {
+		t.Errorf("escaped iframe pageUrl (JS \\/ form) should be stripped, got:\n%s", got)
 	}
-	if strings.Contains(got, `https://docs.google.com/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA/htmlview/sheet/713654230.html">nav</a>`) {
-		t.Errorf("<a href> outside script should have been stripped, got:\n%s", got)
+	if !strings.Contains(got, `/htmlview/sheet/713654230.html`) {
+		t.Errorf("stripped relative path should be present, got:\n%s", got)
+	}
+	if !strings.Contains(got, `\/htmlview\/sheet\/713654230.html`) {
+		t.Errorf("stripped escaped relative path should be present, got:\n%s", got)
 	}
 }
 

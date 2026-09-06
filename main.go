@@ -1483,94 +1483,13 @@ func cleanupStaleAssets(referenced map[string]bool, wwwDir string) {
 }
 
 func stripSheetURLs(html, sheetPath string) string {
-	prefix := "https://docs.google.com" + sheetPath
 	modes := []string{"htmlview", "preview"}
-
-	segments := splitOutsideScripts(html)
-	for i, seg := range segments {
-		if seg.inScript {
-			segments[i].text = stripScriptExceptPageURLs(seg.text, prefix, modes)
-		} else {
-			segments[i].text = stripPrefix(seg.text, prefix, modes)
-		}
-	}
-
-	var b strings.Builder
-	for _, seg := range segments {
-		b.WriteString(seg.text)
-	}
-	return b.String()
+	html = stripVariant(html, "https://docs.google.com"+sheetPath, "/", modes)
+	html = stripVariant(html, `https:\/\/docs.google.com`+strings.ReplaceAll(sheetPath, "/", `\/`), `\/`, modes)
+	return html
 }
 
-var rePageURLKey = regexp.MustCompile(`(?i)pageUrl\s*:\s*"`)
-
-func stripScriptExceptPageURLs(script, prefix string, modes []string) string {
-	protected := pageURLValueRanges(script)
-	if len(protected) == 0 {
-		return stripPrefix(script, prefix, modes)
-	}
-
-	var b strings.Builder
-	idx := 0
-	for _, p := range protected {
-		b.WriteString(stripPrefix(script[idx:p.start], prefix, modes))
-		b.WriteString(script[p.start:p.end])
-		idx = p.end
-	}
-	b.WriteString(stripPrefix(script[idx:], prefix, modes))
-	return b.String()
-}
-
-func pageURLValueRanges(script string) []struct{ start, end int } {
-	var ranges []struct{ start, end int }
-	for _, loc := range rePageURLKey.FindAllStringIndex(script, -1) {
-		urlStart := loc[1]
-		close := strings.Index(script[urlStart:], `"`)
-		if close < 0 {
-			break
-		}
-		urlEnd := urlStart + close
-		ranges = append(ranges, struct{ start, end int }{urlStart, urlEnd})
-	}
-	return ranges
-}
-
-type htmlSegment struct {
-	text     string
-	inScript bool
-}
-
-func splitOutsideScripts(html string) []htmlSegment {
-	var segs []htmlSegment
-	cursor := 0
-	for {
-		start := strings.Index(strings.ToLower(html[cursor:]), "<script")
-		if start < 0 {
-			segs = append(segs, htmlSegment{text: html[cursor:]})
-			return segs
-		}
-		start += cursor
-		if start > cursor {
-			segs = append(segs, htmlSegment{text: html[cursor:start]})
-		}
-		tagEnd := strings.Index(html[start:], ">")
-		if tagEnd < 0 {
-			segs = append(segs, htmlSegment{text: html[start:]})
-			return segs
-		}
-		scriptStart := start + tagEnd + 1
-		closeIdx := strings.Index(strings.ToLower(html[scriptStart:]), "</script")
-		if closeIdx < 0 {
-			segs = append(segs, htmlSegment{text: html[start:], inScript: true})
-			return segs
-		}
-		closeAbs := scriptStart + closeIdx
-		segs = append(segs, htmlSegment{text: html[start:closeAbs+len("</script>")], inScript: true})
-		cursor = closeAbs + len("</script>")
-	}
-}
-
-func stripPrefix(html, prefix string, modes []string) string {
+func stripVariant(html, prefix, sep string, modes []string) string {
 	idx := 0
 	for {
 		at := strings.Index(html[idx:], prefix)
@@ -1582,8 +1501,8 @@ func stripPrefix(html, prefix string, modes []string) string {
 		rest := html[after:]
 		matched := false
 		for _, m := range modes {
-			if strings.HasPrefix(rest, "/"+m) {
-				html = html[:matchStart] + "/" + m + rest[len(m)+1:]
+			if strings.HasPrefix(rest, sep+m) {
+				html = html[:matchStart] + sep + m + rest[len(sep+m):]
 				matched = true
 				break
 			}
