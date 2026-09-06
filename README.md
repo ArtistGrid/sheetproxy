@@ -91,12 +91,13 @@ Per-job `seo` flag (defaults to `true` when missing):
   want to serve Google's vanilla output with no extra meta tags.
 
 Per-job `strip_sheets` flag (defaults to `true` when missing):
-- `strip_sheets: true` (default) — strips `https://docs.google.com/<sheet path>`
-  (plain and JS-escaped) from the rendered HTML so internal sheet links
-  become relative. This is the historical behavior.
+- `strip_sheets: true` (default) — rewrites internal sheet navigation
+  (`/htmlview/...`, `/preview/...`) to relative paths and blanks bare sheet
+  URLs from `<head>` metadata. Body content is never touched: cell link
+  `href`s and their display text keep the full absolute URL, so links like
+  `.../edit?gid=...#gid=...` keep working and keep showing the full URL.
 - `strip_sheets: false` — leaves the absolute `docs.google.com/spreadsheets/...`
-  URLs untouched in the output. Useful when you want to preserve Google's
-  original links back to the live sheet (e.g. for a read-only mirror).
+  URLs untouched everywhere, including `<head>` metadata.
 
 ### SEO
 

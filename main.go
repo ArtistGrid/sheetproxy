@@ -399,7 +399,9 @@ func commonTransform(html string, job *Job) string {
 	html = strings.ReplaceAll(html, `"docs-Helvetica Neue"`, `"Helvetica Neue"`)
 	html = reTitle.ReplaceAllLiteralString(html, `<title>`+job.PageTitle+`</title>`)
 	html = reOgUrl.ReplaceAllString(html, "")
-	html = reSheetUrl.ReplaceAllString(html, "")
+	if job.StripSheets {
+		html = blankSheetURLsInHead(html)
+	}
 	html = reOgTitle.ReplaceAllLiteralString(html, `<meta property="og:title" content="`+job.PageTitle+`">`)
 	html = reDocTitle.ReplaceAllLiteralString(html, `<span class="name">`+job.PageTitle+`</span>`)
 
@@ -1482,6 +1484,18 @@ func cleanupStaleAssets(referenced map[string]bool, wwwDir string) {
 	}
 }
 
+// blankSheetURLsInHead removes bare docs.google.com/spreadsheets/d/<id>
+// mentions from the <head> metadata only (canonical-ish self references).
+// Body content — link hrefs, link text, everything the reader sees — is left
+// untouched so cell links keep working and keep their display text.
+func blankSheetURLsInHead(html string) string {
+	idx := strings.Index(strings.ToLower(html), "</head>")
+	if idx < 0 {
+		return reSheetUrl.ReplaceAllString(html, "")
+	}
+	return reSheetUrl.ReplaceAllString(html[:idx], "") + html[idx:]
+}
+
 func stripSheetURLs(html, sheetPath string) string {
 	modes := []string{"htmlview", "preview"}
 	html = stripVariant(html, "https://docs.google.com"+sheetPath, "/", modes)
@@ -1489,8 +1503,7 @@ func stripSheetURLs(html, sheetPath string) string {
 	return html
 }
 
-func stripVariant(html, prefix, sep string, modes []string) string {
-	idx := 0
+func stripVariant(html, prefix, sep string, modes []string) string {	idx := 0
 	for {
 		at := strings.Index(html[idx:], prefix)
 		if at < 0 {

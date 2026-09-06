@@ -155,6 +155,51 @@ func TestStripSheetURLsPreservesCellLinks(t *testing.T) {
 	}
 }
 
+func TestCommonTransformPreservesCellLinkAndText(t *testing.T) {
+	seoFalse := false
+	job, err := normalizeJob(jobConfig{
+		SheetURL:  "https://docs.google.com/spreadsheets/d/1shKl9S-r5d1vgzYGSEyWflyyn0LS_AKJ7Ydjsczbb0Y",
+		PageTitle: "T",
+		SEO:       &seoFalse,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cellLink := `https://docs.google.com/spreadsheets/d/1shKl9S-r5d1vgzYGSEyWflyyn0LS_AKJ7Ydjsczbb0Y/edit?gid=34972268#gid=34972268`
+	in := `<html><head><title>t</title><link rel="canonical" href="https://docs.google.com/spreadsheets/d/1shKl9S-r5d1vgzYGSEyWflyyn0LS_AKJ7Ydjsczbb0Y/htmlview"></head>` +
+		`<body><a target="_blank" rel="noreferrer" href="` + cellLink + `">` + cellLink + `<br><br></a></body></html>`
+	got := commonTransform(in, job)
+	if c := strings.Count(got, cellLink); c < 2 {
+		t.Errorf("cell link href AND text should keep the full URL, found %d occurrences in:\n%s", c, got)
+	}
+	head := got
+	if idx := strings.Index(strings.ToLower(got), "</head>"); idx >= 0 {
+		head = got[:idx]
+	}
+	if strings.Contains(head, `docs.google.com/spreadsheets/d/1shKl9S-r5d1vgzYGSEyWflyyn0LS_AKJ7Ydjsczbb0Y`) {
+		t.Errorf("bare sheet URL should still be blanked from <head> metadata, head was:\n%s", head)
+	}
+}
+
+func TestCommonTransformStripSheetsFalseKeepsHeadURLs(t *testing.T) {
+	seoFalse := false
+	stripFalse := false
+	job, err := normalizeJob(jobConfig{
+		SheetURL:    "https://docs.google.com/spreadsheets/d/abc123",
+		PageTitle:   "T",
+		SEO:         &seoFalse,
+		StripSheets: &stripFalse,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	in := `<html><head><title>t</title><link rel="canonical" href="https://docs.google.com/spreadsheets/d/abc123/htmlview"></head><body>x</body></html>`
+	got := commonTransform(in, job)
+	if !strings.Contains(got, `https://docs.google.com/spreadsheets/d/abc123/htmlview`) {
+		t.Errorf("strip_sheets=false should leave head sheet URLs untouched, got:\n%s", got)
+	}
+}
+
 func TestStripSheetURLsStripsIframeURLs(t *testing.T) {
 	sheetPath := "/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA"
 	iframeURL := `https://docs.google.com/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA/htmlview/sheet/713654230.html`
