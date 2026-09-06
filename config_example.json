@@ -19,7 +19,9 @@
       "analytics": true,
       "plausible_script": "",
       "poll_minutes": 10,
-      "mode": "htmlview"
+      "mode": "htmlview",
+      "seo": true,
+      "strip_sheets": true
     },
     {
       "sheet_id": "2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7q8R9s0T1u",
@@ -30,7 +32,9 @@
       "analytics": false,
       "plausible_script": "",
       "poll_minutes": 15,
-      "mode": "preview"
+      "mode": "preview",
+      "seo": false,
+      "strip_sheets": false
     }
   ]
 }

@@ -111,6 +111,8 @@ type Job struct {
 	PollMinutes     int
 	Mode            string
 	LastUpdate      time.Time
+	DoSEO           bool
+	StripSheets     bool
 
 	mu            sync.Mutex
 	cssImportSeen sync.Map
@@ -142,6 +144,8 @@ type jobConfig struct {
 	ArtistName      string `json:"artist_name"`
 	PollMinutes     int    `json:"poll_minutes"`
 	Mode            string `json:"mode"`
+	SEO             *bool  `json:"seo"`
+	StripSheets     *bool  `json:"strip_sheets"`
 }
 
 func normalizeJob(c jobConfig) (*Job, error) {
@@ -190,6 +194,14 @@ func normalizeJob(c jobConfig) (*Job, error) {
 	if mode != "htmlview" && mode != "preview" {
 		mode = "htmlview"
 	}
+	seo := true
+	if c.SEO != nil {
+		seo = *c.SEO
+	}
+	stripSheets := true
+	if c.StripSheets != nil {
+		stripSheets = *c.StripSheets
+	}
 	return &Job{
 		SheetURL:        u,
 		SheetPath:       u2.Path,
@@ -205,6 +217,8 @@ func normalizeJob(c jobConfig) (*Job, error) {
 		ArtistName:      artist,
 		PollMinutes:     pm,
 		Mode:            mode,
+		DoSEO:           seo,
+		StripSheets:     stripSheets,
 	}, nil
 }
 
@@ -405,7 +419,9 @@ func commonTransform(html string, job *Job) string {
 		}
 	}
 
-	html = injectSEOMeta(html, job)
+	if job.DoSEO {
+		html = injectSEOMeta(html, job)
+	}
 	return html
 }
 
@@ -1150,10 +1166,9 @@ func fetchTransformedMain(job *Job) string {
 	}
 	html := string(data)
 
-	plain := "https://docs.google.com" + job.SheetPath
-	escaped := strings.ReplaceAll("https:\\/\\/docs.google.com"+strings.ReplaceAll(job.SheetPath, "/", "\\/"), "/", "\\/")
-	html = strings.ReplaceAll(html, plain, "")
-	html = strings.ReplaceAll(html, escaped, "")
+	if job.StripSheets {
+		html = stripSheetURLs(html, job.SheetPath)
+	}
 
 	return commonTransform(html, job)
 }
@@ -1467,6 +1482,33 @@ func cleanupStaleAssets(referenced map[string]bool, wwwDir string) {
 	}
 }
 
+func stripSheetURLs(html, sheetPath string) string {
+	prefix := "https://docs.google.com" + sheetPath
+	modes := []string{"htmlview", "preview"}
+	idx := 0
+	for {
+		at := strings.Index(html[idx:], prefix)
+		if at < 0 {
+			break
+		}
+		matchStart := idx + at
+		after := matchStart + len(prefix)
+		rest := html[after:]
+		matched := false
+		for _, m := range modes {
+			if strings.HasPrefix(rest, "/"+m) {
+				html = html[:matchStart] + "/" + m + rest[len(m)+1:]
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			idx = after
+		}
+	}
+	return html
+}
+
 func pageSEO(job *Job) (artist, desc, escTitle, escDesc, short string) {
 	artist = strings.TrimSpace(job.ArtistName)
 	if artist == "" {
@@ -1647,9 +1689,9 @@ func generate(ctx context.Context, job *Job) {
 		mainHTML = strings.ReplaceAll(mainHTML, old2, new)
 	}
 
-	escapedPrefix := `https:\/\/docs.google.com` + strings.ReplaceAll(job.SheetPath, "/", `\/`)
-	mainHTML = strings.ReplaceAll(mainHTML, escapedPrefix, "")
-	mainHTML = strings.ReplaceAll(mainHTML, "https://docs.google.com"+job.SheetPath, "")
+	if job.StripSheets {
+		mainHTML = stripSheetURLs(mainHTML, job.SheetPath)
+	}
 
 	externalSet := make(map[string]bool)
 	var externalList []string

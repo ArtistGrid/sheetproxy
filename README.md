@@ -65,7 +65,9 @@ fallback. See `config_example.json` for a full example:
       "www_dir": "./www1",
       "git_repo": "user/repo-one",
       "page_title": "Tracker One",
-      "page_description": "Release tracker for Tracker One"
+      "page_description": "Release tracker for Tracker One",
+      "seo": true,
+      "strip_sheets": true
     },
     {
       "sheet_id": "2B3c4D5e...",
@@ -73,11 +75,28 @@ fallback. See `config_example.json` for a full example:
       "git_repo": "user/repo-two",
       "page_title": "Tracker Two",
       "favicon_url": "https://example.com/fav.ico",
-      "analytics": false
+      "analytics": false,
+      "seo": false,
+      "strip_sheets": false
     }
   ]
 }
 ```
+
+Per-job `seo` flag (defaults to `true` when missing):
+- `seo: true` (default) — injects the full SEO/GEO markup described below.
+- `seo: false` — skips the SEO injection; the rendered HTML is left exactly
+  as the Google Sheets HTML view / preview delivers it (after the normal
+  asset rewriting, link rewriting, and image rewriting). Useful when you
+  want to serve Google's vanilla output with no extra meta tags.
+
+Per-job `strip_sheets` flag (defaults to `true` when missing):
+- `strip_sheets: true` (default) — strips `https://docs.google.com/<sheet path>`
+  (plain and JS-escaped) from the rendered HTML so internal sheet links
+  become relative. This is the historical behavior.
+- `strip_sheets: false` — leaves the absolute `docs.google.com/spreadsheets/...`
+  URLs untouched in the output. Useful when you want to preserve Google's
+  original links back to the live sheet (e.g. for a read-only mirror).
 
 ### SEO
 

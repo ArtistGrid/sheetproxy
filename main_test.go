@@ -40,6 +40,121 @@ func TestNormalizeJobMode(t *testing.T) {
 	}
 }
 
+func TestNormalizeJobSEO(t *testing.T) {
+	seoTrue := true
+	seoFalse := false
+	tests := []struct {
+		name    string
+		input   *bool
+		wantSEO bool
+	}{
+		{"missing defaults to true", nil, true},
+		{"explicit true stays true", &seoTrue, true},
+		{"explicit false stays false", &seoFalse, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job, err := normalizeJob(jobConfig{
+				SheetURL: "https://docs.google.com/spreadsheets/d/abc123",
+				SEO:      tt.input,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if job.DoSEO != tt.wantSEO {
+				t.Errorf("DoSEO = %v, want %v", job.DoSEO, tt.wantSEO)
+			}
+		})
+	}
+}
+
+func TestNormalizeJobStripSheets(t *testing.T) {
+	stripTrue := true
+	stripFalse := false
+	tests := []struct {
+		name            string
+		input           *bool
+		wantStripSheets bool
+	}{
+		{"missing defaults to true", nil, true},
+		{"explicit true stays true", &stripTrue, true},
+		{"explicit false stays false", &stripFalse, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job, err := normalizeJob(jobConfig{
+				SheetURL:    "https://docs.google.com/spreadsheets/d/abc123",
+				StripSheets: tt.input,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if job.StripSheets != tt.wantStripSheets {
+				t.Errorf("StripSheets = %v, want %v", job.StripSheets, tt.wantStripSheets)
+			}
+		})
+	}
+}
+
+func TestCommonTransformSkipsSEO(t *testing.T) {
+	job := &Job{Mode: "htmlview", PageTitle: "Frank Ocean Tracker", Lang: "en", DoSEO: false}
+	in := `<html><head><title>t</title></head><body><img src="/static/x.png"></body></html>`
+	got := commonTransform(in, job)
+	for _, w := range []string{
+		`<meta name="robots"`,
+		`<meta property="og:type"`,
+		`<meta name="twitter:card"`,
+		`application/ld+json`,
+		`<meta name="handheldfriendly"`,
+	} {
+		if strings.Contains(got, w) {
+			t.Errorf("SEO meta should not be injected when DoSEO=false, got %q in:\n%s", w, got)
+		}
+	}
+}
+
+func TestStripSheetURLs(t *testing.T) {
+	sheetPath := "/spreadsheets/d/abc123"
+	in := `<a href="https://docs.google.com/spreadsheets/d/abc123/htmlview">x</a>` +
+		`<a href="https://docs.google.com/spreadsheets/d/abc123/preview">y</a>` +
+		`<a href="https://other.example.com/keep">z</a>`
+	got := stripSheetURLs(in, sheetPath)
+	for _, w := range []string{
+		`docs.google.com/spreadsheets/d/abc123`,
+	} {
+		if strings.Contains(got, w) {
+			t.Errorf("stripped URL still contains %q in:\n%s", w, got)
+		}
+	}
+	if !strings.Contains(got, `https://other.example.com/keep`) {
+		t.Errorf("unrelated URL should be preserved in:\n%s", got)
+	}
+	if !strings.Contains(got, `>x</a>`) || !strings.Contains(got, `>y</a>`) {
+		t.Errorf("anchor bodies should be preserved in:\n%s", got)
+	}
+}
+
+func TestStripSheetURLsPreservesCellLinks(t *testing.T) {
+	sheetPath := "/spreadsheets/d/1shKl9S-r5d1vgzYGSEyWflyyn0LS_AKJ7Ydjsczbb0Y"
+	cellLink := `https://docs.google.com/spreadsheets/d/1shKl9S-r5d1vgzYGSEyWflyyn0LS_AKJ7Ydjsczbb0Y/edit?gid=34972268#gid=34972268`
+	in := `<a href="` + cellLink + `">cell link</a>` +
+		`<a href="https://docs.google.com/spreadsheets/d/1shKl9S-r5d1vgzYGSEyWflyyn0LS_AKJ7Ydjsczbb0Y/htmlview">nav</a>` +
+		`<a href="https://docs.google.com/spreadsheets/d/1shKl9S-r5d1vgzYGSEyWflyyn0LS_AKJ7Ydjsczbb0Y">bare</a>`
+	got := stripSheetURLs(in, sheetPath)
+	if !strings.Contains(got, cellLink) {
+		t.Errorf("cell link to /edit?gid=... should be preserved, got:\n%s", got)
+	}
+	if strings.Contains(got, `https://docs.google.com/spreadsheets/d/1shKl9S-r5d1vgzYGSEyWflyyn0LS_AKJ7Ydjsczbb0Y/htmlview`) {
+		t.Errorf("internal /htmlview nav should have been stripped (absolute prefix removed), got:\n%s", got)
+	}
+	if !strings.Contains(got, `>bare</a>`) {
+		t.Errorf("bare sheet URL (no nav path) should be preserved, got:\n%s", got)
+	}
+	if !strings.Contains(got, `>nav</a>`) {
+		t.Errorf("nav anchor body should be preserved, got:\n%s", got)
+	}
+}
+
 func TestExtractAssetPathsHtmlview(t *testing.T) {
 	job := &Job{Mode: "htmlview"}
 	html := `<img src="/htmlview/sheet/image1.png">` +
@@ -424,7 +539,7 @@ func TestEnsureAppleTouchIcon(t *testing.T) {
 }
 
 func TestCommonTransformiOSMeta(t *testing.T) {
-	job := &Job{Mode: "htmlview", PageTitle: "Frank Ocean Tracker", Lang: "en"}
+	job := &Job{Mode: "htmlview", PageTitle: "Frank Ocean Tracker", Lang: "en", DoSEO: true}
 	in := `<html><head><title>t</title></head><body><img src="/static/x.png"></body></html>`
 	got := commonTransform(in, job)
 	for _, w := range []string{
@@ -450,7 +565,7 @@ func mustOpen(t *testing.T, path string) *os.File {
 }
 
 func TestNoVisibleContentInjected(t *testing.T) {
-	job := &Job{Mode: "htmlview", PageTitle: "Frank Ocean Tracker", Lang: "en"}
+	job := &Job{Mode: "htmlview", PageTitle: "Frank Ocean Tracker", Lang: "en", DoSEO: true}
 	html := `<html><head></head><body><div class="sheet"></div></body></html>`
 	got := commonTransform(html, job)
 	for _, w := range []string{`<footer`, `tracker-about`, `<h1`, `contentinfo`} {
