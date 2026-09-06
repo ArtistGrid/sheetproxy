@@ -155,6 +155,23 @@ func TestStripSheetURLsPreservesCellLinks(t *testing.T) {
 	}
 }
 
+func TestStripSheetURLsSkipsScriptBlocks(t *testing.T) {
+	sheetPath := "/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA"
+	iframeURL := `https://docs.google.com/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA/htmlview/sheet/713654230.html`
+	in := `<html><head><script>
+items.push({pageUrl: "` + iframeURL + `", gid: "713654230"});
+</script></head><body>` +
+		`<a href="` + iframeURL + `">nav</a>` +
+		`</body></html>`
+	got := stripSheetURLs(in, sheetPath)
+	if !strings.Contains(got, iframeURL) {
+		t.Errorf("iframe URL inside <script> should NOT be stripped, got:\n%s", got)
+	}
+	if strings.Contains(got, `https://docs.google.com/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA/htmlview/sheet/713654230.html">nav</a>`) {
+		t.Errorf("<a href> outside script should have been stripped, got:\n%s", got)
+	}
+}
+
 func TestExtractAssetPathsHtmlview(t *testing.T) {
 	job := &Job{Mode: "htmlview"}
 	html := `<img src="/htmlview/sheet/image1.png">` +

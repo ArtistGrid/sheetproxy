@@ -1485,6 +1485,58 @@ func cleanupStaleAssets(referenced map[string]bool, wwwDir string) {
 func stripSheetURLs(html, sheetPath string) string {
 	prefix := "https://docs.google.com" + sheetPath
 	modes := []string{"htmlview", "preview"}
+
+	segments := splitOutsideScripts(html)
+	for i, seg := range segments {
+		if seg.inScript {
+			continue
+		}
+		segments[i].text = stripPrefix(seg.text, prefix, modes)
+	}
+
+	var b strings.Builder
+	for _, seg := range segments {
+		b.WriteString(seg.text)
+	}
+	return b.String()
+}
+
+type htmlSegment struct {
+	text     string
+	inScript bool
+}
+
+func splitOutsideScripts(html string) []htmlSegment {
+	var segs []htmlSegment
+	cursor := 0
+	for {
+		start := strings.Index(strings.ToLower(html[cursor:]), "<script")
+		if start < 0 {
+			segs = append(segs, htmlSegment{text: html[cursor:]})
+			return segs
+		}
+		start += cursor
+		if start > cursor {
+			segs = append(segs, htmlSegment{text: html[cursor:start]})
+		}
+		tagEnd := strings.Index(html[start:], ">")
+		if tagEnd < 0 {
+			segs = append(segs, htmlSegment{text: html[start:]})
+			return segs
+		}
+		scriptStart := start + tagEnd + 1
+		closeIdx := strings.Index(strings.ToLower(html[scriptStart:]), "</script")
+		if closeIdx < 0 {
+			segs = append(segs, htmlSegment{text: html[start:], inScript: true})
+			return segs
+		}
+		closeAbs := scriptStart + closeIdx
+		segs = append(segs, htmlSegment{text: html[start:closeAbs+len("</script>")], inScript: true})
+		cursor = closeAbs + len("</script>")
+	}
+}
+
+func stripPrefix(html, prefix string, modes []string) string {
 	idx := 0
 	for {
 		at := strings.Index(html[idx:], prefix)
