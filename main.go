@@ -153,9 +153,14 @@ func normalizeJob(c jobConfig) (*Job, error) {
 	if c.SheetID != "" {
 		u = "https://docs.google.com/spreadsheets/d/" + c.SheetID
 	}
+	// Sheet identity is path-only: drop query/fragment (e.g. /edit?gid=123#gid=123).
+	if i := strings.IndexAny(u, "?#"); i >= 0 {
+		u = u[:i]
+	}
 	u = strings.TrimRight(u, "/")
 	u = strings.TrimSuffix(u, "/htmlview")
 	u = strings.TrimSuffix(u, "/preview")
+	u = strings.TrimSuffix(u, "/edit")
 	if u == "" {
 		return nil, fmt.Errorf("sheet_id or sheet_url required")
 	}

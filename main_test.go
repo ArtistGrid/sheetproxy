@@ -40,6 +40,18 @@ func TestNormalizeJobMode(t *testing.T) {
 	}
 }
 
+func TestNormalizeJobStripsEditSuffixAndQuery(t *testing.T) {
+	job, err := normalizeJob(jobConfig{
+		SheetURL: "https://docs.google.com/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA/edit?gid=713654230#gid=713654230",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if job.SheetPath != "/spreadsheets/d/1oEzVbKJJfNXPf2TFOsMjzZjcCB08NPvIJ3K_CZfKGJA" {
+		t.Errorf("SheetPath = %q, want sheet path without /edit, query or fragment", job.SheetPath)
+	}
+}
+
 func TestNormalizeJobSEO(t *testing.T) {
 	seoTrue := true
 	seoFalse := false
